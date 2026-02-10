@@ -121,11 +121,7 @@ digits3:
 section .text
 _start:
     and rsp, -16
-    xor eax, eax
-    mov [in_len], rax
-    mov [in_pos], rax
-    mov [stdout_used], rax
-    mov [interactive_mode], rax
+    cld
 
     call detect_interactive
 
@@ -823,13 +819,13 @@ parse_op_token:
 print_grouped_int_ln_stdout:
     push rbx
 
-    mov rax, rdi
-    xor r10d, r10d
-    test rax, rax
-    jge .mag_ready
-
-    mov r10d, 1
-    neg rax
+    mov rax, rdi            ; original signed value
+    mov rcx, rax
+    sar rcx, 63             ; 0 for >=0, -1 for <0
+    mov r10d, ecx
+    and r10d, 1             ; sign flag
+    xor rax, rcx
+    sub rax, rcx            ; absolute magnitude as unsigned, handles INT64_MIN
 
 .mag_ready:
     lea r11, [rel out_buf + OUT_BUF_SIZE]
@@ -925,7 +921,7 @@ print_grouped_int_ln_stdout:
 
 ; print_error_line_stderr -> rax=0 success, <0 on write error
 print_error_line_stderr:
-    push rbx
+    sub rsp, 8
 
     mov rax, [err_code]
 
@@ -978,7 +974,7 @@ print_error_line_stderr:
 .emit:
     call write_stderr_direct
 
-    pop rbx
+    add rsp, 8
     ret
 
 ; write_stdout_buffered(ptr=rdi, len=rsi) -> rax=0 success, <0 error
@@ -1046,7 +1042,7 @@ write_stdout_buffered:
 
 ; flush_stdout -> rax=0 success, <0 error
 flush_stdout:
-    push rbx
+    sub rsp, 8
 
     mov rsi, [stdout_used]
     test rsi, rsi
@@ -1064,38 +1060,38 @@ flush_stdout:
     xor eax, eax
 
 .done:
-    pop rbx
+    add rsp, 8
     ret
 
 ; write_stdout_direct(ptr=rdi, len=rsi) -> rax=0 success, <0 error
 write_stdout_direct:
-    push rbx
+    sub rsp, 8
 
     mov rdx, rsi
     mov rsi, rdi
     mov edi, STDOUT
     call sys_write_all_fd
 
-    pop rbx
+    add rsp, 8
     ret
 
 ; write_stderr_direct(ptr=rdi, len=rsi) -> rax=0 success, <0 error
 write_stderr_direct:
-    push rbx
+    sub rsp, 8
 
     mov rdx, rsi
     mov rsi, rdi
     mov edi, STDERR
     call sys_write_all_fd
 
-    pop rbx
+    add rsp, 8
     ret
 
-; detect_interactive: interactive_mode=1 if stdin is tty, else 0
+; detect_interactive: interactive_mode=1 if stdout is tty, else 0
 detect_interactive:
-    push rbx
+    sub rsp, 8
 
-    mov edi, STDIN
+    mov edi, STDOUT
     mov esi, TCGETS
     lea rdx, [rel tty_probe]
     call sys_ioctl_fd
@@ -1110,7 +1106,7 @@ detect_interactive:
     mov [interactive_mode], rax
 
 .done:
-    pop rbx
+    add rsp, 8
     ret
 
 ; sys_read_fd(fd=rdi, buf=rsi, len=rdx) -> rax
