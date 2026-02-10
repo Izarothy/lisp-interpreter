@@ -815,14 +815,12 @@ print_grouped_int_ln_stdout:
     push rbx
 
     mov rax, rdi
-    xor r10d, r10d
-    test rax, rax
-    jns .mag_ready
-
-    mov r10d, 1
-    neg rax
-    jno .mag_ready
-    mov rax, 0x8000000000000000
+    mov rcx, rax
+    sar rcx, 63
+    mov r10d, ecx
+    and r10d, 1
+    xor rax, rcx
+    sub rax, rcx
 
 .mag_ready:
     lea r11, [rel out_buf + OUT_BUF_SIZE]
@@ -1034,13 +1032,6 @@ write_stdout_buffered:
     mov rax, [stdout_used]
     add rax, r13
     mov [stdout_used], rax
-
-    mov rax, [interactive_mode]
-    test rax, rax
-    jz .success
-
-    call flush_stdout
-    jmp .done
 
 .success:
     xor eax, eax
