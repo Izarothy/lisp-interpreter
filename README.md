@@ -1,16 +1,18 @@
 # lisp-interpreter
 
-Minimal Lisp-like arithmetic interpreter in x86-64 Linux assembly using NASM + `ld`.
+Lisp-like arithmetic interpreter for Linux x86-64, written in NASM assembly and linked with `ld`.
 
 ## Features
 
-- Linux x86-64 target, syscall-only (`read`, `write`, `exit`)
-- REPL loop: reads one expression per line until EOF
-- Supported operators: `add`, `sub`, `mul`, `div`
-- Nested expressions
-- Singleton list numbers: `(3)` evaluates to `3`
-- Signed division using `idiv` (truncate toward zero)
-- Error recovery: prints `error: <reason>` and continues to next line
+- Syscall-only runtime (`read`, `write`, `exit`), no libc
+- REPL loop (one expression per line)
+- Operators: `add`, `sub`, `mul`, `div`
+- Nested expressions and singleton numeric list form `(3)`
+- Signed 64-bit arithmetic with overflow detection
+- Division truncates toward zero (`idiv` semantics)
+- Grouped decimal output with commas every 3 digits
+- Deterministic I/O failure handling (no silent read/write failure)
+- Buffered stdout for lower syscall overhead in non-interactive mode
 
 ## Grammar
 
@@ -19,16 +21,41 @@ Minimal Lisp-like arithmetic interpreter in x86-64 Linux assembly using NASM + `
 - `symbol := add | sub | mul | div`
 - `number := '-'? [0-9]+`
 
+## Operator Token Rules
+
+Operator symbols must be exact tokens. After `add`/`sub`/`mul`/`div`, the next byte must be one of:
+
+- whitespace (`space`, `tab`, `\n`, `\r`)
+- `)`
+- end-of-line
+
+Examples rejected as malformed/unknown symbols:
+
+- `(add1 2)`
+- `(add-1 2)`
+- `(mul0 2)`
+- `(div2 2)`
+- `(sub-5)`
+
 ## Semantics
 
-- `add`: variadic, minimum 1 arg
-- `mul`: variadic, minimum 1 arg
-- `sub`: one arg => unary negate, otherwise left-fold subtraction
-- `div`: minimum 2 args, left-fold signed division
-- Division by zero errors
-- Integer overflow errors (parse and arithmetic)
+- `add`: variadic, minimum 1 argument
+- `mul`: variadic, minimum 1 argument
+- `sub`: one argument => unary negation, otherwise left-fold subtraction
+- `div`: minimum 2 arguments, left-fold signed division
 
-## Error Reasons
+## Streams
+
+- Successful evaluation result lines are written to `stdout`.
+- Interpreter error lines (`error: ...`) are written to `stderr`.
+
+## Blank Lines
+
+Blank/whitespace-only input lines are ignored (no output, no error).
+
+## Errors
+
+Interpreter errors are reported as `error: <reason>` where `<reason>` is:
 
 - `unexpected token`
 - `unmatched parenthesis`
@@ -36,6 +63,19 @@ Minimal Lisp-like arithmetic interpreter in x86-64 Linux assembly using NASM + `
 - `unknown symbol`
 - `division by zero`
 - `integer overflow`
+- `line too long`
+
+## I/O Failure Behavior
+
+- Non-EINTR `read` failure from stdin is treated as fatal (not EOF).
+- Write failures are not ignored.
+- Fatal I/O paths emit `fatal: ...` to `stderr` when possible and exit non-zero.
+
+Exit codes:
+
+- `0`: normal EOF termination
+- `1`: fatal stdin read failure
+- `2`: fatal output failure
 
 ## Build
 
@@ -43,22 +83,21 @@ Minimal Lisp-like arithmetic interpreter in x86-64 Linux assembly using NASM + `
 make
 ```
 
-This runs:
+Default build settings are in `Makefile`:
 
-```bash
-nasm -f elf64 src/main.asm -o build/main.o && ld build/main.o -o lispasm
-```
+- configurable tools: `NASM`, `LD`
+- configurable flags: `NASMFLAGS`, `LDFLAGS`
+- `LINKMODE=pie|static` (default `pie`)
+- auto-detected `DYNAMIC_LINKER` for PIE (override if needed)
+- hardened link defaults: `-z relro -z now -z noexecstack -z separate-code`
+- explicit non-exec stack note via `.note.GNU-stack`
+
+If `nasm` is not on your default `PATH`, prepend its location when invoking `make`.
 
 ## Run
 
 ```bash
 make run
-```
-
-Or:
-
-```bash
-./lispasm
 ```
 
 ## Test
@@ -67,19 +106,17 @@ Or:
 make test
 ```
 
-The runner uses `tests/cases.txt` and also checks that the REPL continues after an error line.
-
-## Make Targets
-
-- `all`
-- `run`
-- `test`
-- `clean`
-
-## Notes for this Windows + WSL environment
-
-If `nasm` is not globally installed in WSL, you can provide it via `PATH`:
+Microbenchmark helper:
 
 ```bash
-PATH="$HOME/.local/nasm-pkg/usr/bin:$PATH" make test
+make bench
 ```
+
+Tests validate:
+
+- arithmetic semantics and overflow behavior
+- malformed operator token rejection
+- stdout/stderr separation
+- blank-line behavior
+- long-line recovery
+- REPL continuation after errors
