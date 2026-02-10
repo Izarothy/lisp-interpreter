@@ -15,7 +15,7 @@
 %define LINE_BUF_SIZE 4096
 %define IN_BUF_SIZE 16384
 %define OUT_BUF_SIZE 64
-%define STDOUT_BUF_SIZE 65536
+%define STDOUT_BUF_SIZE 1048576
 
 %define OP_ADD 1
 %define OP_SUB 2
@@ -43,19 +43,23 @@ default rel
 
 global _start
 
+%macro IS_WS_AL 1
+    cmp al, ' '
+    je %1
+    cmp al, 9
+    je %1
+    cmp al, 10
+    je %1
+    cmp al, 13
+    je %1
+%endmacro
+
 %macro SKIP_WS 0
 %%loop:
     cmp rsi, rdi
     jae %%done
     mov al, [rsi]
-    cmp al, ' '
-    je %%adv
-    cmp al, 9
-    je %%adv
-    cmp al, 10
-    je %%adv
-    cmp al, 13
-    je %%adv
+    IS_WS_AL %%adv
     jmp %%done
 %%adv:
     inc rsi
@@ -120,7 +124,6 @@ digits3:
 
 section .text
 _start:
-    and rsp, -16
     cld
 
     call detect_interactive
@@ -219,10 +222,11 @@ read_line:
     mov r13, rsi            ; destination capacity
     xor ebx, ebx            ; bytes written
     xor r14d, r14d          ; overflow flag
+    mov r15, [in_pos]
+    mov r10, [in_len]
 
 .refill_or_process:
-    mov rax, [in_pos]
-    cmp rax, [in_len]
+    cmp r15, r10
     jb .have_buffer_data
 
     mov edi, STDIN
@@ -234,33 +238,30 @@ read_line:
     jz .eof
     js .read_error
 
-    mov [in_len], rax
-    xor eax, eax
-    mov [in_pos], rax
+    mov r10, rax
+    xor r15d, r15d
 
 .have_buffer_data:
-    mov rax, [in_pos]
-    lea r15, [rel in_buf]
-    add r15, rax
+    lea r8, [rel in_buf]
+    add r8, r15
+    mov r9, r10
+    sub r9, r15             ; available bytes
 
-    mov r9, [in_len]
-    sub r9, rax             ; available bytes
-
-    mov rdi, r15
+    mov rdi, r8
     mov rcx, r9
     mov al, 10
     repne scasb
     setz r11b
 
-    mov r10, r9
-    sub r10, rcx            ; bytes to consume from input buffer
+    mov rdx, r9
+    sub rdx, rcx            ; bytes to consume from input buffer
 
     test r14, r14
     jnz .after_copy
 
     mov rax, r13
     sub rax, rbx            ; remaining destination capacity
-    cmp r10, rax
+    cmp rdx, rax
     jbe .copy_all
 
     test rax, rax
@@ -268,7 +269,7 @@ read_line:
 
     mov rcx, rax
     lea rdi, [r12 + rbx]
-    mov rsi, r15
+    mov rsi, r8
     rep movsb
     add rbx, rax
 
@@ -277,16 +278,14 @@ read_line:
     jmp .after_copy
 
 .copy_all:
-    mov rcx, r10
+    mov rcx, rdx
     lea rdi, [r12 + rbx]
-    mov rsi, r15
+    mov rsi, r8
     rep movsb
-    add rbx, r10
+    add rbx, rdx
 
 .after_copy:
-    mov rax, [in_pos]
-    add rax, r10
-    mov [in_pos], rax
+    add r15, rdx
 
     test r11b, r11b
     jz .refill_or_process
@@ -319,6 +318,9 @@ read_line:
     mov rax, READLINE_TOO_LONG
 
 .done:
+    mov [in_pos], r15
+    mov [in_len], r10
+
     pop r15
     pop r14
     pop r13
@@ -367,7 +369,7 @@ parse_line_eval:
 ; parse_expr_eval(rsi=ptr, rdi=end) -> rdx=1 success (rax=value), rdx=0 failure
 ; updates rsi to next parse position on success.
 parse_expr_eval:
-    push rbx
+    sub rsp, 8
 
     SKIP_WS
     cmp rsi, rdi
@@ -400,7 +402,7 @@ parse_expr_eval:
     xor edx, edx
 
 .done:
-    pop rbx
+    add rsp, 8
     ret
 
 ; parse_list_eval(rsi=ptr, rdi=end) -> rdx=1 success (rax=value), rdx=0 failure
@@ -464,14 +466,7 @@ parse_list_eval:
     mov al, [rsi]
     cmp al, ')'
     je .boundary_ok
-    cmp al, ' '
-    je .boundary_ok
-    cmp al, 9
-    je .boundary_ok
-    cmp al, 10
-    je .boundary_ok
-    cmp al, 13
-    je .boundary_ok
+    IS_WS_AL .boundary_ok
     jmp .fail_unknown
 
 .boundary_ok:
@@ -991,6 +986,20 @@ write_stdout_buffered:
     mov r12, rdi
     mov r13, rsi
 
+    mov rax, [interactive_mode]
+    test rax, rax
+    jz .buffered_path
+
+    call flush_stdout
+    test rax, rax
+    js .done
+
+    mov rdi, r12
+    mov rsi, r13
+    call write_stdout_direct
+    jmp .done
+
+.buffered_path:
     cmp r13, STDOUT_BUF_SIZE
     jbe .fit_buffer
 
