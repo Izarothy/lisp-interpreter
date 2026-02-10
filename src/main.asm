@@ -12,6 +12,13 @@
 %define OP_MUL 3
 %define OP_DIV 4
 
+%define ERR_NONE 0
+%define ERR_UNEXPECTED_TOKEN 1
+%define ERR_UNMATCHED_PAREN 2
+%define ERR_MISSING_ARGUMENTS 3
+%define ERR_UNKNOWN_SYMBOL 4
+%define ERR_DIV_ZERO 5
+
 global _start
 
 section .bss
@@ -21,6 +28,21 @@ line_len: resq 1
 parse_pos: resq 1
 tok_ptr: resq 1
 tok_len: resq 1
+err_code: resq 1
+
+section .rodata
+err_prefix: db "error: "
+err_prefix_len: equ $ - err_prefix
+msg_unexpected: db "unexpected token", 10
+msg_unexpected_len: equ $ - msg_unexpected
+msg_unmatched: db "unmatched parenthesis", 10
+msg_unmatched_len: equ $ - msg_unmatched
+msg_missing: db "missing arguments", 10
+msg_missing_len: equ $ - msg_missing
+msg_unknown: db "unknown symbol", 10
+msg_unknown_len: equ $ - msg_unknown
+msg_div_zero: db "division by zero", 10
+msg_div_zero_len: equ $ - msg_div_zero
 
 section .text
 _start:
@@ -35,9 +57,13 @@ _start:
 
     call parse_line_eval
     cmp rdx, 1
-    jne .repl
+    jne .print_error
     mov rdi, rax
     call print_int_ln
+    jmp .repl
+
+.print_error:
+    call print_error_line
     jmp .repl
 
 .exit:
@@ -171,9 +197,60 @@ print_int_ln:
     pop rax
     ret
 
+print_error_line:
+    mov rdi, err_prefix
+    mov rsi, err_prefix_len
+    call sys_write
+
+    mov rax, [err_code]
+    cmp rax, ERR_UNMATCHED_PAREN
+    je .unmatched
+    cmp rax, ERR_MISSING_ARGUMENTS
+    je .missing
+    cmp rax, ERR_UNKNOWN_SYMBOL
+    je .unknown
+    cmp rax, ERR_DIV_ZERO
+    je .div_zero
+
+    mov rdi, msg_unexpected
+    mov rsi, msg_unexpected_len
+    jmp .emit
+
+.unmatched:
+    mov rdi, msg_unmatched
+    mov rsi, msg_unmatched_len
+    jmp .emit
+
+.missing:
+    mov rdi, msg_missing
+    mov rsi, msg_missing_len
+    jmp .emit
+
+.unknown:
+    mov rdi, msg_unknown
+    mov rsi, msg_unknown_len
+    jmp .emit
+
+.div_zero:
+    mov rdi, msg_div_zero
+    mov rsi, msg_div_zero_len
+
+.emit:
+    call sys_write
+    ret
+
 ; parse_line_eval -> rdx=1 success (rax=value), rdx=0 failure
 parse_line_eval:
+    mov qword [err_code], ERR_NONE
     call skip_ws
+    call peek_char
+    cmp al, 0
+    jne .parse_expr
+    mov qword [err_code], ERR_UNEXPECTED_TOKEN
+    xor edx, edx
+    ret
+
+.parse_expr:
     call parse_expr_eval
     cmp rdx, 1
     jne .done
@@ -184,6 +261,7 @@ parse_line_eval:
 .done:
     ret
 .fail:
+    mov qword [err_code], ERR_UNEXPECTED_TOKEN
     xor edx, edx
     ret
 
@@ -196,7 +274,7 @@ parse_expr_eval:
 
     call read_number_token
     cmp rax, 1
-    jne .fail
+    jne .unexpected
     call parse_number_from_token
     mov edx, 1
     ret
@@ -204,6 +282,8 @@ parse_expr_eval:
 .list:
     jmp parse_list_eval
 
+.unexpected:
+    mov qword [err_code], ERR_UNEXPECTED_TOKEN
 .fail:
     xor eax, eax
     xor edx, edx
@@ -219,15 +299,15 @@ parse_list_eval:
 
     call peek_char
     cmp al, '('
-    jne .fail
+    jne .fail_unexpected
     call advance_char
 
     call skip_ws
     call peek_char
     cmp al, 0
-    je .fail
+    je .fail_unmatched
     cmp al, ')'
-    je .fail
+    je .fail_missing
 
     mov rbx, [parse_pos]
     call read_symbol_token
@@ -237,13 +317,18 @@ parse_list_eval:
     mov [parse_pos], rbx
     call read_number_token
     cmp rax, 1
-    jne .fail
+    jne .fail_unexpected
     call parse_number_from_token
     mov r8, rax
     call skip_ws
     call peek_char
     cmp al, ')'
-    jne .fail
+    je .consume_singleton_close
+    cmp al, 0
+    je .fail_unmatched
+    jmp .fail_unexpected
+
+.consume_singleton_close:
     call advance_char
     mov rax, r8
     mov edx, 1
@@ -252,7 +337,7 @@ parse_list_eval:
 .symbol_form:
     call parse_op_token
     cmp eax, 0
-    je .fail
+    je .fail_unknown
     mov r9, rax          ; op code
 
     xor rcx, rcx         ; arg count
@@ -262,13 +347,13 @@ parse_list_eval:
     call skip_ws
     call peek_char
     cmp al, 0
-    je .fail
+    je .fail_unmatched
     cmp al, ')'
     je .close
 
     call parse_expr_eval
     cmp rdx, 1
-    jne .fail
+    jne .fail_preserve
 
     cmp rcx, 0
     jne .combine
@@ -285,7 +370,7 @@ parse_list_eval:
     je .combine_mul
     cmp r9, OP_DIV
     je .combine_div
-    jmp .fail
+    jmp .fail_unexpected
 
 .combine_add:
     add r8, rax
@@ -305,7 +390,7 @@ parse_list_eval:
 .combine_div:
     mov r10, rax
     cmp r10, 0
-    je .fail
+    je .fail_div_zero
     mov rax, r8
     cqo
     idiv r10
@@ -315,13 +400,13 @@ parse_list_eval:
 
 .close:
     cmp rcx, 0
-    je .fail
+    je .fail_missing
     call advance_char
 
     cmp r9, OP_DIV
     jne .check_sub
     cmp rcx, 2
-    jb .fail
+    jb .fail_missing
 
 .check_sub:
     cmp r9, OP_SUB
@@ -335,7 +420,28 @@ parse_list_eval:
     mov edx, 1
     jmp .ok
 
-.fail:
+.fail_unmatched:
+    mov qword [err_code], ERR_UNMATCHED_PAREN
+    jmp .fail_common
+
+.fail_missing:
+    mov qword [err_code], ERR_MISSING_ARGUMENTS
+    jmp .fail_common
+
+.fail_unknown:
+    mov qword [err_code], ERR_UNKNOWN_SYMBOL
+    jmp .fail_common
+
+.fail_unexpected:
+    mov qword [err_code], ERR_UNEXPECTED_TOKEN
+    jmp .fail_common
+
+.fail_div_zero:
+    mov qword [err_code], ERR_DIV_ZERO
+    jmp .fail_common
+
+.fail_preserve:
+.fail_common:
     xor eax, eax
     xor edx, edx
 
