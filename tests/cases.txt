@@ -8,6 +8,11 @@
 (div -7 2) => -3
 (foo 1 2) => error: unknown symbol
 (div 4 0) => error: division by zero
+(div -9223372036854775808 -1) => error: integer overflow
 (add) => error: missing arguments
 (add 1 2 => error: unmatched parenthesis
 abc => error: unexpected token
+(add 9223372036854775807 1) => error: integer overflow
+(mul 3037000500 3037000500) => error: integer overflow
+(-9223372036854775809) => error: integer overflow
+(sub -9223372036854775808) => error: integer overflow

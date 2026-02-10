@@ -26,6 +26,7 @@ Minimal Lisp-like arithmetic interpreter in x86-64 Linux assembly using NASM + `
 - `sub`: one arg => unary negate, otherwise left-fold subtraction
 - `div`: minimum 2 args, left-fold signed division
 - Division by zero errors
+- Integer overflow errors (parse and arithmetic)
 
 ## Error Reasons
 
@@ -34,6 +35,7 @@ Minimal Lisp-like arithmetic interpreter in x86-64 Linux assembly using NASM + `
 - `missing arguments`
 - `unknown symbol`
 - `division by zero`
+- `integer overflow`
 
 ## Build
 

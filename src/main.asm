@@ -18,6 +18,7 @@
 %define ERR_MISSING_ARGUMENTS 3
 %define ERR_UNKNOWN_SYMBOL 4
 %define ERR_DIV_ZERO 5
+%define ERR_OVERFLOW 6
 
 global _start
 
@@ -43,6 +44,8 @@ msg_unknown: db "unknown symbol", 10
 msg_unknown_len: equ $ - msg_unknown
 msg_div_zero: db "division by zero", 10
 msg_div_zero_len: equ $ - msg_div_zero
+msg_overflow: db "integer overflow", 10
+msg_overflow_len: equ $ - msg_overflow
 
 section .text
 _start:
@@ -211,6 +214,8 @@ print_error_line:
     je .unknown
     cmp rax, ERR_DIV_ZERO
     je .div_zero
+    cmp rax, ERR_OVERFLOW
+    je .overflow
 
     mov rdi, msg_unexpected
     mov rsi, msg_unexpected_len
@@ -234,6 +239,11 @@ print_error_line:
 .div_zero:
     mov rdi, msg_div_zero
     mov rsi, msg_div_zero_len
+    jmp .emit
+
+.overflow:
+    mov rdi, msg_overflow
+    mov rsi, msg_overflow_len
 
 .emit:
     call sys_write
@@ -278,6 +288,8 @@ parse_expr_eval:
     cmp rax, 1
     jne .unexpected
     call parse_number_from_token
+    cmp rdx, 1
+    jne .fail_preserve
     mov edx, 1
     ret
 
@@ -286,6 +298,7 @@ parse_expr_eval:
 
 .unexpected:
     mov qword [err_code], ERR_UNEXPECTED_TOKEN
+.fail_preserve:
 .fail:
     xor eax, eax
     xor edx, edx
@@ -321,6 +334,8 @@ parse_list_eval:
     cmp rax, 1
     jne .fail_unexpected
     call parse_number_from_token
+    cmp rdx, 1
+    jne .fail_preserve
     mov r8, rax
     call skip_ws
     call peek_char
@@ -382,16 +397,19 @@ parse_list_eval:
 
 .combine_add:
     add r8, rax
+    jo .fail_overflow
     inc rcx
     jmp .arg_loop
 
 .combine_sub:
     sub r8, rax
+    jo .fail_overflow
     inc rcx
     jmp .arg_loop
 
 .combine_mul:
     imul r8, rax
+    jo .fail_overflow
     inc rcx
     jmp .arg_loop
 
@@ -399,6 +417,13 @@ parse_list_eval:
     mov r10, rax
     cmp r10, 0
     je .fail_div_zero
+    cmp r10, -1
+    jne .do_div
+    mov rax, r8
+    mov r11, 0x8000000000000000
+    cmp rax, r11
+    je .fail_overflow
+.do_div:
     mov rax, r8
     cqo
     idiv r10
@@ -421,6 +446,9 @@ parse_list_eval:
     jne .return_acc
     cmp rcx, 1
     jne .return_acc
+    mov r11, 0x8000000000000000
+    cmp r8, r11
+    je .fail_overflow
     neg r8
 
 .return_acc:
@@ -446,6 +474,10 @@ parse_list_eval:
 
 .fail_div_zero:
     mov qword [err_code], ERR_DIV_ZERO
+    jmp .fail_common
+
+.fail_overflow:
+    mov qword [err_code], ERR_OVERFLOW
     jmp .fail_common
 
 .fail_preserve:
@@ -602,10 +634,10 @@ read_number_token:
     ret
 
 ; parse tok_ptr/tok_len as decimal signed integer -> rax
+; returns rdx=1 success, rdx=0 failure (err_code set)
 parse_number_from_token:
     push rbx
     push rcx
-    push rdx
     push rsi
 
     mov rsi, [tok_ptr]
@@ -615,34 +647,52 @@ parse_number_from_token:
     xor rbx, rbx
 
     cmp rcx, 0
-    je .done
+    je .success
 
     mov dl, [rsi]
     cmp dl, '-'
-    jne .digits
+    jne .digits_start
     mov bl, 1
     inc rsi
     dec rcx
 
+.digits_start:
+    cmp rcx, 0
+    je .success
+
 .digits:
     cmp rcx, 0
-    je .apply_sign
+    je .success
     movzx rdx, byte [rsi]
     sub rdx, '0'
     imul rax, rax, 10
+    jo .overflow
+    cmp bl, 1
+    je .digit_sub
     add rax, rdx
+    jo .overflow
+    jmp .next_digit
+
+.digit_sub:
+    sub rax, rdx
+    jo .overflow
+
+.next_digit:
     inc rsi
     dec rcx
     jmp .digits
 
-.apply_sign:
-    cmp bl, 1
-    jne .done
-    neg rax
+.success:
+    mov edx, 1
+    jmp .done
+
+.overflow:
+    mov qword [err_code], ERR_OVERFLOW
+    xor eax, eax
+    xor edx, edx
 
 .done:
     pop rsi
-    pop rdx
     pop rcx
     pop rbx
     ret
