@@ -27,7 +27,8 @@ _start:
     mov [line_len], rax
     mov qword [parse_pos], 0
 
-    ; IO-only stage: parser/evaluator not wired yet.
+    call parse_line_syntax
+    ; Parsing stage only. Evaluation/output added later.
     jmp .repl
 
 .exit:
@@ -106,6 +107,99 @@ sys_write:
 sys_exit:
     mov rax, SYS_EXIT
     syscall
+
+; parse_line_syntax -> rax=1 success, rax=0 failure
+parse_line_syntax:
+    call skip_ws
+    call parse_expr_syntax
+    cmp rax, 1
+    jne .fail
+    call skip_ws
+    mov rax, [parse_pos]
+    cmp rax, [line_len]
+    jne .fail
+    mov rax, 1
+    ret
+.fail:
+    xor eax, eax
+    ret
+
+; parse_expr_syntax -> rax=1 success, rax=0 failure
+parse_expr_syntax:
+    call skip_ws
+    call peek_char
+    cmp al, '('
+    je .list
+    call read_number_token
+    ret
+.list:
+    jmp parse_list_syntax
+
+; parse_list_syntax -> rax=1 success, rax=0 failure
+parse_list_syntax:
+    push rbx
+    push rcx
+
+    call peek_char
+    cmp al, '('
+    jne .fail
+    call advance_char
+
+    call skip_ws
+    call peek_char
+    cmp al, 0
+    je .fail
+    cmp al, ')'
+    je .fail
+
+    mov rbx, [parse_pos]
+    call read_symbol_token
+    cmp rax, 1
+    je .symbol_form
+
+    mov [parse_pos], rbx
+    call read_number_token
+    cmp rax, 1
+    jne .fail
+    call skip_ws
+    call peek_char
+    cmp al, ')'
+    jne .fail
+    call advance_char
+    mov rax, 1
+    pop rcx
+    pop rbx
+    ret
+
+.symbol_form:
+    xor rcx, rcx
+.arg_loop:
+    call skip_ws
+    call peek_char
+    cmp al, 0
+    je .fail
+    cmp al, ')'
+    je .close
+    call parse_expr_syntax
+    cmp rax, 1
+    jne .fail
+    inc rcx
+    jmp .arg_loop
+
+.close:
+    cmp rcx, 0
+    je .fail
+    call advance_char
+    mov rax, 1
+    pop rcx
+    pop rbx
+    ret
+
+.fail:
+    xor eax, eax
+    pop rcx
+    pop rbx
+    ret
 
 ; skip spaces/tabs/newlines at parse_pos
 skip_ws:
