@@ -254,10 +254,12 @@ parse_line_eval:
     call parse_expr_eval
     cmp rdx, 1
     jne .done
+    mov r8, rax
     call skip_ws
     mov rcx, [parse_pos]
     cmp rcx, [line_len]
     jne .fail
+    mov rax, r8
 .done:
     ret
 .fail:
@@ -351,7 +353,13 @@ parse_list_eval:
     cmp al, ')'
     je .close
 
+    push rcx
+    push r8
+    push r9
     call parse_expr_eval
+    pop r9
+    pop r8
+    pop rcx
     cmp rdx, 1
     jne .fail_preserve
 
