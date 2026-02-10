@@ -5,6 +5,12 @@ CC ?= cc
 NASMFLAGS ?= -f elf64 -Wall -Werror -Ox
 LDFLAGS ?= -z relro -z now -z noexecstack -z separate-code
 LINKMODE ?= pie
+NASM_SUPPORTS_RELOC_REL_DWORD := $(shell $(NASM) -h 2>&1 | grep -q 'reloc-rel-dword' && echo 1 || echo 0)
+
+ifeq ($(NASM_SUPPORTS_RELOC_REL_DWORD),1)
+  NASMFLAGS += -w-reloc-rel-dword
+endif
+
 CC_LOADER := $(shell p="$$( $(CC) -print-file-name=ld-linux-x86-64.so.2 2>/dev/null )"; [ "$$p" != "ld-linux-x86-64.so.2" ] && [ -e "$$p" ] && echo "$$p")
 DYNAMIC_LINKER ?= $(firstword $(CC_LOADER) $(wildcard /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/lib/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1))
 
