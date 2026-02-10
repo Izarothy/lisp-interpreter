@@ -1,0 +1,13 @@
+# Format: <input> => <expected_output_without_trailing_newline>
+(add 1 2) => 3
+(sub 5 3) => 2
+(mul 2 4 3) => 24
+(div 8 2) => 4
+(add (div 4 4) (sub 5 3) (3) (mul 2 2)) => 10
+(sub 5) => -5
+(div -7 2) => -3
+(foo 1 2) => error: unknown symbol
+(div 4 0) => error: division by zero
+(add) => error: missing arguments
+(add 1 2 => error: unmatched parenthesis
+abc => error: unexpected token
