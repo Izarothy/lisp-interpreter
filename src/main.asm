@@ -7,6 +7,10 @@
 
 %define LINE_BUF_SIZE 4096
 
+%define OP_ADD 1
+%define OP_SUB 2
+%define OP_MUL 3
+
 global _start
 
 section .bss
@@ -27,8 +31,8 @@ _start:
     mov [line_len], rax
     mov qword [parse_pos], 0
 
-    call parse_line_syntax
-    ; Parsing stage only. Evaluation/output added later.
+    call parse_line_eval
+    ; Evaluation stage: result printing and mapped errors added later.
     jmp .repl
 
 .exit:
@@ -108,37 +112,51 @@ sys_exit:
     mov rax, SYS_EXIT
     syscall
 
-; parse_line_syntax -> rax=1 success, rax=0 failure
-parse_line_syntax:
+; parse_line_eval -> rdx=1 success (rax=value), rdx=0 failure
+parse_line_eval:
     call skip_ws
-    call parse_expr_syntax
-    cmp rax, 1
-    jne .fail
+    call parse_expr_eval
+    cmp rdx, 1
+    jne .done
     call skip_ws
-    mov rax, [parse_pos]
-    cmp rax, [line_len]
+    mov rcx, [parse_pos]
+    cmp rcx, [line_len]
     jne .fail
-    mov rax, 1
+.done:
     ret
 .fail:
-    xor eax, eax
+    xor edx, edx
     ret
 
-; parse_expr_syntax -> rax=1 success, rax=0 failure
-parse_expr_syntax:
+; parse_expr_eval -> rdx=1 success (rax=value), rdx=0 failure
+parse_expr_eval:
     call skip_ws
     call peek_char
     cmp al, '('
     je .list
-    call read_number_token
-    ret
-.list:
-    jmp parse_list_syntax
 
-; parse_list_syntax -> rax=1 success, rax=0 failure
-parse_list_syntax:
+    call read_number_token
+    cmp rax, 1
+    jne .fail
+    call parse_number_from_token
+    mov edx, 1
+    ret
+
+.list:
+    jmp parse_list_eval
+
+.fail:
+    xor eax, eax
+    xor edx, edx
+    ret
+
+; parse_list_eval -> rdx=1 success (rax=value), rdx=0 failure
+parse_list_eval:
     push rbx
     push rcx
+    push r8
+    push r9
+    push r10
 
     call peek_char
     cmp al, '('
@@ -161,18 +179,26 @@ parse_list_syntax:
     call read_number_token
     cmp rax, 1
     jne .fail
+    call parse_number_from_token
+    mov r8, rax
     call skip_ws
     call peek_char
     cmp al, ')'
     jne .fail
     call advance_char
-    mov rax, 1
-    pop rcx
-    pop rbx
-    ret
+    mov rax, r8
+    mov edx, 1
+    jmp .ok
 
 .symbol_form:
-    xor rcx, rcx
+    call parse_op_token
+    cmp eax, 0
+    je .fail
+    mov r9, rax          ; op code
+
+    xor rcx, rcx         ; arg count
+    xor r8, r8           ; accumulator
+
 .arg_loop:
     call skip_ws
     call peek_char
@@ -180,9 +206,38 @@ parse_list_syntax:
     je .fail
     cmp al, ')'
     je .close
-    call parse_expr_syntax
-    cmp rax, 1
+
+    call parse_expr_eval
+    cmp rdx, 1
     jne .fail
+
+    cmp rcx, 0
+    jne .combine
+    mov r8, rax
+    inc rcx
+    jmp .arg_loop
+
+.combine:
+    cmp r9, OP_ADD
+    je .combine_add
+    cmp r9, OP_SUB
+    je .combine_sub
+    cmp r9, OP_MUL
+    je .combine_mul
+    jmp .fail
+
+.combine_add:
+    add r8, rax
+    inc rcx
+    jmp .arg_loop
+
+.combine_sub:
+    sub r8, rax
+    inc rcx
+    jmp .arg_loop
+
+.combine_mul:
+    imul r8, rax
     inc rcx
     jmp .arg_loop
 
@@ -190,13 +245,26 @@ parse_list_syntax:
     cmp rcx, 0
     je .fail
     call advance_char
-    mov rax, 1
-    pop rcx
-    pop rbx
-    ret
+
+    cmp r9, OP_SUB
+    jne .return_acc
+    cmp rcx, 1
+    jne .return_acc
+    neg r8
+
+.return_acc:
+    mov rax, r8
+    mov edx, 1
+    jmp .ok
 
 .fail:
     xor eax, eax
+    xor edx, edx
+
+.ok:
+    pop r10
+    pop r9
+    pop r8
     pop rcx
     pop rbx
     ret
@@ -339,4 +407,103 @@ read_number_token:
     xor eax, eax
     pop rcx
     pop rbx
+    ret
+
+; parse tok_ptr/tok_len as decimal signed integer -> rax
+parse_number_from_token:
+    push rbx
+    push rcx
+    push rdx
+    push rsi
+
+    mov rsi, [tok_ptr]
+    mov rcx, [tok_len]
+    lea rsi, [line_buf + rsi]
+    xor rax, rax
+    xor rbx, rbx
+
+    cmp rcx, 0
+    je .done
+
+    mov dl, [rsi]
+    cmp dl, '-'
+    jne .digits
+    mov bl, 1
+    inc rsi
+    dec rcx
+
+.digits:
+    cmp rcx, 0
+    je .apply_sign
+    movzx rdx, byte [rsi]
+    sub rdx, '0'
+    imul rax, rax, 10
+    add rax, rdx
+    inc rsi
+    dec rcx
+    jmp .digits
+
+.apply_sign:
+    cmp bl, 1
+    jne .done
+    neg rax
+
+.done:
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+    ret
+
+; parse operator token in tok_ptr/tok_len -> eax opcode or 0
+parse_op_token:
+    mov rcx, [tok_ptr]
+    lea rsi, [line_buf + rcx]
+    mov rcx, [tok_len]
+
+    cmp rcx, 3
+    je .len3
+    cmp rcx, 4
+    je .len4
+    xor eax, eax
+    ret
+
+.len3:
+    mov al, [rsi]
+    cmp al, 'a'
+    jne .check_sub_mul
+    cmp byte [rsi + 1], 'd'
+    jne .unknown
+    cmp byte [rsi + 2], 'd'
+    jne .unknown
+    mov eax, OP_ADD
+    ret
+
+.check_sub_mul:
+    cmp al, 's'
+    jne .check_mul
+    cmp byte [rsi + 1], 'u'
+    jne .unknown
+    cmp byte [rsi + 2], 'b'
+    jne .unknown
+    mov eax, OP_SUB
+    ret
+
+.check_mul:
+    cmp al, 'm'
+    jne .unknown
+    cmp byte [rsi + 1], 'u'
+    jne .unknown
+    cmp byte [rsi + 2], 'l'
+    jne .unknown
+    mov eax, OP_MUL
+    ret
+
+.len4:
+    ; div handled in later arithmetic commit
+    xor eax, eax
+    ret
+
+.unknown:
+    xor eax, eax
     ret
