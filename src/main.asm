@@ -819,13 +819,15 @@ parse_op_token:
 print_grouped_int_ln_stdout:
     push rbx
 
-    mov rax, rdi            ; original signed value
-    mov rcx, rax
-    sar rcx, 63             ; 0 for >=0, -1 for <0
-    mov r10d, ecx
-    and r10d, 1             ; sign flag
-    xor rax, rcx
-    sub rax, rcx            ; absolute magnitude as unsigned, handles INT64_MIN
+    mov rax, rdi
+    xor r10d, r10d
+    test rax, rax
+    jns .mag_ready
+
+    mov r10d, 1
+    neg rax
+    jno .mag_ready
+    mov rax, 0x8000000000000000
 
 .mag_ready:
     lea r11, [rel out_buf + OUT_BUF_SIZE]
