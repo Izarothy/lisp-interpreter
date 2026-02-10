@@ -16,6 +16,7 @@ global _start
 
 section .bss
 line_buf: resb LINE_BUF_SIZE
+out_buf: resb 64
 line_len: resq 1
 parse_pos: resq 1
 tok_ptr: resq 1
@@ -33,7 +34,10 @@ _start:
     mov qword [parse_pos], 0
 
     call parse_line_eval
-    ; Evaluation stage: result printing and mapped errors added later.
+    cmp rdx, 1
+    jne .repl
+    mov rdi, rax
+    call print_int_ln
     jmp .repl
 
 .exit:
@@ -112,6 +116,60 @@ sys_write:
 sys_exit:
     mov rax, SYS_EXIT
     syscall
+
+; print_int_ln(value=rdi)
+print_int_ln:
+    push rax
+    push rbx
+    push rcx
+    push rdx
+    push r8
+    push r9
+    push r10
+    push r11
+
+    mov rax, rdi
+    lea rbx, [out_buf + 63]
+    mov byte [rbx], 10
+    mov rcx, 1
+    mov r11, rax
+    mov r9, 10
+
+.digits:
+    cqo
+    idiv r9
+    mov r10, rdx
+    cmp r10, 0
+    jge .abs_done
+    neg r10
+.abs_done:
+    add r10b, '0'
+    dec rbx
+    mov [rbx], r10b
+    inc rcx
+    cmp rax, 0
+    jne .digits
+
+    cmp r11, 0
+    jge .emit
+    dec rbx
+    mov byte [rbx], '-'
+    inc rcx
+
+.emit:
+    mov rdi, rbx
+    mov rsi, rcx
+    call sys_write
+
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdx
+    pop rcx
+    pop rbx
+    pop rax
+    ret
 
 ; parse_line_eval -> rdx=1 success (rax=value), rdx=0 failure
 parse_line_eval:
