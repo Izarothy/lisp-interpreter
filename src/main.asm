@@ -10,6 +10,7 @@
 %define OP_ADD 1
 %define OP_SUB 2
 %define OP_MUL 3
+%define OP_DIV 4
 
 global _start
 
@@ -224,6 +225,8 @@ parse_list_eval:
     je .combine_sub
     cmp r9, OP_MUL
     je .combine_mul
+    cmp r9, OP_DIV
+    je .combine_div
     jmp .fail
 
 .combine_add:
@@ -241,11 +244,28 @@ parse_list_eval:
     inc rcx
     jmp .arg_loop
 
+.combine_div:
+    mov r10, rax
+    cmp r10, 0
+    je .fail
+    mov rax, r8
+    cqo
+    idiv r10
+    mov r8, rax
+    inc rcx
+    jmp .arg_loop
+
 .close:
     cmp rcx, 0
     je .fail
     call advance_char
 
+    cmp r9, OP_DIV
+    jne .check_sub
+    cmp rcx, 2
+    jb .fail
+
+.check_sub:
     cmp r9, OP_SUB
     jne .return_acc
     cmp rcx, 1
@@ -463,8 +483,6 @@ parse_op_token:
 
     cmp rcx, 3
     je .len3
-    cmp rcx, 4
-    je .len4
     xor eax, eax
     ret
 
@@ -491,7 +509,7 @@ parse_op_token:
 
 .check_mul:
     cmp al, 'm'
-    jne .unknown
+    jne .check_div
     cmp byte [rsi + 1], 'u'
     jne .unknown
     cmp byte [rsi + 2], 'l'
@@ -499,9 +517,16 @@ parse_op_token:
     mov eax, OP_MUL
     ret
 
-.len4:
-    ; div handled in later arithmetic commit
-    xor eax, eax
+.check_div:
+    cmp al, 'd'
+    jne .unknown
+    cmp byte [rsi], 'd'
+    jne .unknown
+    cmp byte [rsi + 1], 'i'
+    jne .unknown
+    cmp byte [rsi + 2], 'v'
+    jne .unknown
+    mov eax, OP_DIV
     ret
 
 .unknown:
