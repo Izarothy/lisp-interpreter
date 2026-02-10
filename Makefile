@@ -5,11 +5,21 @@ CC ?= cc
 NASMFLAGS ?= -f elf64 -Wall -Werror -Ox
 LDFLAGS ?= -z relro -z now -z noexecstack -z separate-code
 LINKMODE ?= pie
-NASM_SUPPORTS_RELOC_REL_DWORD := $(shell $(NASM) -h 2>&1 | grep -q 'reloc-rel-dword' && echo 1 || echo 0)
 
-ifeq ($(NASM_SUPPORTS_RELOC_REL_DWORD),1)
-  NASMFLAGS += -w-reloc-rel-dword
-endif
+NASM_RELOC_WARN_FLAGS := $(shell \
+  if command -v "$(NASM)" >/dev/null 2>&1; then \
+    d="$$(mktemp -d 2>/dev/null || mktemp -d -t nasmprobe)"; \
+    asm="$$d/probe.asm"; \
+    obj="$$d/probe.o"; \
+    printf 'bits 64\nsection .text\nnop\n' > "$$asm"; \
+    if "$(NASM)" -f elf64 -Wall -Werror -w-unknown-warning -w-reloc-rel-dword "$$asm" -o "$$obj" >/dev/null 2>&1; then \
+      echo '-w-unknown-warning -w-reloc-rel-dword'; \
+    elif "$(NASM)" -f elf64 -Wall -Werror -w-reloc-rel-dword "$$asm" -o "$$obj" >/dev/null 2>&1; then \
+      echo '-w-reloc-rel-dword'; \
+    fi; \
+    rm -rf "$$d"; \
+  fi)
+NASMFLAGS += $(NASM_RELOC_WARN_FLAGS)
 
 CC_LOADER := $(shell p="$$( $(CC) -print-file-name=ld-linux-x86-64.so.2 2>/dev/null )"; [ "$$p" != "ld-linux-x86-64.so.2" ] && [ -e "$$p" ] && echo "$$p")
 DYNAMIC_LINKER ?= $(firstword $(CC_LOADER) $(wildcard /lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/lib/ld-linux-x86-64.so.2 /lib/ld-musl-x86_64.so.1))
