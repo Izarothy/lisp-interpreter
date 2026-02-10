@@ -112,6 +112,19 @@ Microbenchmark helper:
 make bench
 ```
 
+Direct benchmark script usage:
+
+```bash
+bash tests/bench.sh ./lispasm [lines] [expr] [runs] [warmup]
+```
+
+Benchmark behavior:
+
+- timed runs discard `stdout` to focus on interpreter compute/parsing cost
+- one untimed validation run writes output and checks `output_lines == lines`
+- reports `real_median`, `real_min`, and `real_avg` across repeated runs
+- supports optional CPU pinning via `BENCH_CPU` (uses `taskset` when available)
+
 Tests validate:
 
 - arithmetic semantics and overflow behavior
