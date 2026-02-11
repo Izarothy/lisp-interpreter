@@ -162,6 +162,8 @@ _start:
     jne .have_line
 
     mov dword [err_code], ERR_LINE_TOO_LONG
+    cmp dword [stderr_sink], SINK_STATE_YES
+    je .repl
     call print_error_line_stderr
     test rax, rax
     js .exit_write_error
@@ -187,6 +189,8 @@ _start:
     jmp .repl
 
 .print_error:
+    cmp dword [stderr_sink], SINK_STATE_YES
+    je .repl
     call print_error_line_stderr
     test rax, rax
     js .exit_write_error
@@ -396,6 +400,8 @@ process_mmap_input:
     jmp .advance
 
 .emit_error:
+    cmp dword [stderr_sink], SINK_STATE_YES
+    je .advance
     call print_error_line_stderr
     test rax, rax
     js .fail
@@ -403,6 +409,8 @@ process_mmap_input:
 
 .line_too_long:
     mov dword [err_code], ERR_LINE_TOO_LONG
+    cmp dword [stderr_sink], SINK_STATE_YES
+    je .advance
     call print_error_line_stderr
     test rax, rax
     js .fail
@@ -698,54 +706,49 @@ parse_number_value:
     jae .none_restore
 
 .first_digit:
-    movzx ecx, byte [r11]
-    cmp ecx, '0'
-    jb .none_restore
-    cmp ecx, '9'
+    movzx edx, byte [r11]
+    sub edx, '0'
+    cmp edx, 9
     ja .none_restore
 
     xor eax, eax
+    mov rcx, 922337203685477580
+
+.digit_loop:
+    cmp rax, rcx
+    ja .overflow
+    jb .acc_ok
+    cmp edx, 8
+    ja .overflow
+
+.acc_ok:
+    lea rax, [rax + rax*4]
+    lea rax, [rdx + rax*2]
+    inc r11
+    cmp r11, rdi
+    jae .digits_done
+    movzx edx, byte [r11]
+    sub edx, '0'
+    cmp edx, 9
+    jbe .digit_loop
+
+.digits_done:
     test r8d, r8d
-    jnz .neg_loop
+    jz .final_pos
 
-.pos_loop:
-    movzx edx, byte [r11]
-    sub edx, '0'
-    imul rax, rax, 10
-    jo .overflow
-    add rax, rdx
-    jo .overflow
-    inc r11
-    cmp r11, rdi
-    jae .pos_done
-    movzx edx, byte [r11]
-    cmp edx, '0'
-    jb .pos_done
-    cmp edx, '9'
-    jbe .pos_loop
+    mov rcx, 0x8000000000000000
+    cmp rax, rcx
+    ja .overflow
+    je .final_ok
+    neg rax
+    jmp .final_ok
 
-.pos_done:
-    mov rsi, r11
-    mov edx, PARSE_STATUS_OK
-    ret
+.final_pos:
+    mov rcx, 0x7fffffffffffffff
+    cmp rax, rcx
+    ja .overflow
 
-.neg_loop:
-    movzx edx, byte [r11]
-    sub edx, '0'
-    imul rax, rax, 10
-    jo .overflow
-    sub rax, rdx
-    jo .overflow
-    inc r11
-    cmp r11, rdi
-    jae .neg_done
-    movzx edx, byte [r11]
-    cmp edx, '0'
-    jb .neg_done
-    cmp edx, '9'
-    jbe .neg_loop
-
-.neg_done:
+.final_ok:
     mov rsi, r11
     mov edx, PARSE_STATUS_OK
     ret
