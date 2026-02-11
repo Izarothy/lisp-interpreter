@@ -84,8 +84,16 @@ global _start
 %%loop:
     cmp rsi, rdi
     jae %%done
-    mov al, [rsi]
-    IS_WS_AL %%adv
+    mov dl, [rsi]
+    cmp dl, ' '
+    je %%adv
+    ja %%done
+    cmp dl, 9
+    je %%adv
+    cmp dl, 10
+    je %%adv
+    cmp dl, 13
+    je %%adv
     jmp %%done
 %%adv:
     inc rsi
