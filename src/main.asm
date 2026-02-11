@@ -568,63 +568,100 @@ parse_list_eval:
     jmp .ok
 
 .symbol_form:
-    ; r12 = opcode selected by parse_op_symbol.
-    xor r14d, r14d          ; arg count
-    xor r13d, r13d          ; accumulator
-
-.arg_loop:
+    ; Parse first argument once, then run an opcode-specialized loop.
     SKIP_WS
     cmp rsi, rdi
     jae .fail_unmatched
-
     cmp byte [rsi], ')'
-    je .close
+    je .fail_missing
 
     call parse_expr_eval
     cmp edx, PARSE_STATUS_OK
     jne .fail_preserve
 
-    test r14, r14
-    jnz .combine
-
     mov r13, rax
-    mov r14, 1
-    jmp .arg_loop
-
-.combine:
     cmp r12, OP_ADD
-    je .combine_add
-    cmp r12, OP_SUB
-    je .combine_sub
+    je .add_loop
     cmp r12, OP_MUL
-    je .combine_mul
-    cmp r12, OP_DIV
-    je .combine_div
-    jmp .fail_unexpected
+    je .mul_loop
+    cmp r12, OP_SUB
+    je .sub_after_first
+    jmp .div_need_rhs
 
-.combine_add:
+.add_loop:
+    SKIP_WS
+    cmp rsi, rdi
+    jae .fail_unmatched
+    cmp byte [rsi], ')'
+    je .close_return
+    call parse_expr_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
     add r13, rax
     jo .fail_overflow
-    inc r14
-    jmp .arg_loop
+    jmp .add_loop
 
-.combine_sub:
-    sub r13, rax
-    jo .fail_overflow
-    inc r14
-    jmp .arg_loop
-
-.combine_mul:
+.mul_loop:
+    SKIP_WS
+    cmp rsi, rdi
+    jae .fail_unmatched
+    cmp byte [rsi], ')'
+    je .close_return
+    call parse_expr_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
     imul r13, rax
     jo .fail_overflow
-    inc r14
-    jmp .arg_loop
+    jmp .mul_loop
 
-.combine_div:
+.sub_after_first:
+    SKIP_WS
+    cmp rsi, rdi
+    jae .fail_unmatched
+    cmp byte [rsi], ')'
+    je .sub_unary_close
+    call parse_expr_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
+    sub r13, rax
+    jo .fail_overflow
+    jmp .sub_loop
+
+.sub_loop:
+    SKIP_WS
+    cmp rsi, rdi
+    jae .fail_unmatched
+    cmp byte [rsi], ')'
+    je .close_return
+    call parse_expr_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
+    sub r13, rax
+    jo .fail_overflow
+    jmp .sub_loop
+
+.sub_unary_close:
+    inc rsi
+    mov rax, 0x8000000000000000
+    cmp r13, rax
+    je .fail_overflow
+    neg r13
+    jmp .return_acc
+
+.div_need_rhs:
+    SKIP_WS
+    cmp rsi, rdi
+    jae .fail_unmatched
+    cmp byte [rsi], ')'
+    je .fail_missing
+    call parse_expr_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
+
+.div_apply:
     mov r15, rax
     test r15, r15
     je .fail_div_zero
-
     cmp r15, -1
     jne .do_div
     mov rax, 0x8000000000000000
@@ -636,29 +673,21 @@ parse_list_eval:
     cqo
     idiv r15
     mov r13, rax
-    inc r14
-    jmp .arg_loop
+    jmp .div_loop
 
-.close:
-    test r14, r14
-    jz .fail_missing
+.div_loop:
+    SKIP_WS
+    cmp rsi, rdi
+    jae .fail_unmatched
+    cmp byte [rsi], ')'
+    je .close_return
+    call parse_expr_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
+    jmp .div_apply
 
+.close_return:
     inc rsi
-
-    cmp r12, OP_DIV
-    jne .check_sub
-    cmp r14, 2
-    jb .fail_missing
-
-.check_sub:
-    cmp r12, OP_SUB
-    jne .return_acc
-    cmp r14, 1
-    jne .return_acc
-    mov rax, 0x8000000000000000
-    cmp r13, rax
-    je .fail_overflow
-    neg r13
 
 .return_acc:
     mov rax, r13
