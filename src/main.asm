@@ -548,12 +548,74 @@ parse_list_eval:
     cmp byte [rsi], ')'
     je .fail_missing
 
-    call parse_op_symbol
-    test edx, edx
-    jz .maybe_singleton_number
-    test eax, eax
-    jz .fail_unknown
-    mov r12, rax
+    movzx eax, byte [rsi]
+    cmp eax, 'a'
+    jb .maybe_singleton_number
+    cmp eax, 'z'
+    ja .maybe_singleton_number
+
+    lea r11, [rsi + 3]
+    cmp r11, rdi
+    ja .fail_unknown
+
+    cmp eax, 'a'
+    je .op_add
+    cmp eax, 's'
+    je .op_sub
+    cmp eax, 'm'
+    je .op_mul
+    cmp eax, 'd'
+    je .op_div
+    jmp .fail_unknown
+
+.op_add:
+    cmp byte [rsi + 1], 'd'
+    jne .fail_unknown
+    cmp byte [rsi + 2], 'd'
+    jne .fail_unknown
+    mov r12d, OP_ADD
+    jmp .op_boundary
+
+.op_sub:
+    cmp byte [rsi + 1], 'u'
+    jne .fail_unknown
+    cmp byte [rsi + 2], 'b'
+    jne .fail_unknown
+    mov r12d, OP_SUB
+    jmp .op_boundary
+
+.op_mul:
+    cmp byte [rsi + 1], 'u'
+    jne .fail_unknown
+    cmp byte [rsi + 2], 'l'
+    jne .fail_unknown
+    mov r12d, OP_MUL
+    jmp .op_boundary
+
+.op_div:
+    cmp byte [rsi + 1], 'i'
+    jne .fail_unknown
+    cmp byte [rsi + 2], 'v'
+    jne .fail_unknown
+    mov r12d, OP_DIV
+
+.op_boundary:
+    cmp r11, rdi
+    jae .op_ok
+    movzx ecx, byte [r11]
+    cmp ecx, ')'
+    je .op_ok
+    cmp ecx, ' '
+    je .op_ok
+    cmp ecx, 9
+    je .op_ok
+    cmp ecx, 10
+    je .op_ok
+    cmp ecx, 13
+    jne .fail_unknown
+
+.op_ok:
+    mov rsi, r11
     jmp .symbol_form
 
 .maybe_singleton_number:
@@ -806,97 +868,6 @@ parse_number_value:
     mov rsi, r10
 
 .none:
-    xor eax, eax
-    xor edx, edx
-    ret
-
-; parse_op_symbol:
-; in:  rsi=ptr, rdi=end
-; out: edx=1 if token begins with [a-z], else 0
-;      eax=opcode on success, 0 on unknown symbol
-;      rsi advanced only on successful opcode parse.
-parse_op_symbol:
-    cmp rsi, rdi
-    jae .not_symbol
-
-    movzx eax, byte [rsi]
-    cmp eax, 'a'
-    jb .not_symbol
-    cmp eax, 'z'
-    ja .not_symbol
-
-    mov edx, 1
-    lea r11, [rsi + 3]
-    cmp r11, rdi
-    ja .unknown
-
-    movzx eax, byte [rsi]
-    cmp eax, 'a'
-    je .check_add
-    cmp eax, 's'
-    je .check_sub
-    cmp eax, 'm'
-    je .check_mul
-    cmp eax, 'd'
-    je .check_div
-    jmp .unknown
-
-.check_add:
-    cmp byte [rsi + 1], 'd'
-    jne .unknown
-    cmp byte [rsi + 2], 'd'
-    jne .unknown
-    mov eax, OP_ADD
-    jmp .check_boundary
-
-.check_sub:
-    cmp byte [rsi + 1], 'u'
-    jne .unknown
-    cmp byte [rsi + 2], 'b'
-    jne .unknown
-    mov eax, OP_SUB
-    jmp .check_boundary
-
-.check_mul:
-    cmp byte [rsi + 1], 'u'
-    jne .unknown
-    cmp byte [rsi + 2], 'l'
-    jne .unknown
-    mov eax, OP_MUL
-    jmp .check_boundary
-
-.check_div:
-    cmp byte [rsi + 1], 'i'
-    jne .unknown
-    cmp byte [rsi + 2], 'v'
-    jne .unknown
-    mov eax, OP_DIV
-
-.check_boundary:
-    cmp r11, rdi
-    jae .ok
-    movzx ecx, byte [r11]
-    cmp ecx, ')'
-    je .ok
-    cmp ecx, ' '
-    je .ok
-    cmp ecx, 9
-    je .ok
-    cmp ecx, 10
-    je .ok
-    cmp ecx, 13
-    je .ok
-    jmp .unknown
-
-.ok:
-    mov rsi, r11
-    ret
-
-.unknown:
-    xor eax, eax
-    ret
-
-.not_symbol:
     xor eax, eax
     xor edx, edx
     ret
