@@ -588,6 +588,7 @@ parse_list_eval:
     je .sub_after_first
     jmp .div_need_rhs
 
+align 16
 .add_loop:
     SKIP_WS
     cmp rsi, rdi
@@ -601,6 +602,7 @@ parse_list_eval:
     jo .fail_overflow
     jmp .add_loop
 
+align 16
 .mul_loop:
     SKIP_WS
     cmp rsi, rdi
@@ -627,6 +629,7 @@ parse_list_eval:
     jo .fail_overflow
     jmp .sub_loop
 
+align 16
 .sub_loop:
     SKIP_WS
     cmp rsi, rdi
@@ -675,6 +678,7 @@ parse_list_eval:
     mov r13, rax
     jmp .div_loop
 
+align 16
 .div_loop:
     SKIP_WS
     cmp rsi, rdi
