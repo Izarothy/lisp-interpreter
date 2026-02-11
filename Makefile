@@ -4,7 +4,7 @@ CC ?= cc
 
 NASMFLAGS ?= -f elf64 -Wall -Werror -Ox
 LDFLAGS ?= -z relro -z now -z noexecstack -z separate-code
-LINKMODE ?= pie
+LINKMODE ?= staticpie
 
 NASM_RELOC_WARN_FLAGS := $(shell \
   if command -v "$(NASM)" >/dev/null 2>&1; then \
@@ -36,10 +36,12 @@ ifeq ($(LINKMODE),pie)
     $(error No dynamic loader path detected for PIE. Set DYNAMIC_LINKER=/path/to/loader or use LINKMODE=static)
   endif
   LINKFLAGS := -pie -dynamic-linker $(DYNAMIC_LINKER)
+else ifeq ($(LINKMODE),staticpie)
+  LINKFLAGS := -pie --no-dynamic-linker
 else ifeq ($(LINKMODE),static)
   LINKFLAGS := -static
 else
-  $(error Unsupported LINKMODE='$(LINKMODE)'; expected pie or static)
+  $(error Unsupported LINKMODE='$(LINKMODE)'; expected pie, staticpie, or static)
 endif
 
 all: $(BIN)

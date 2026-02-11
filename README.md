@@ -87,10 +87,12 @@ Default build settings are in `Makefile`:
 
 - configurable tools: `NASM`, `LD`
 - configurable flags: `NASMFLAGS`, `LDFLAGS`
-- `LINKMODE=pie|static` (default `pie`)
+- `LINKMODE=staticpie|pie|static` (default `staticpie`)
 - auto-detected `DYNAMIC_LINKER` for PIE (override if needed)
 - hardened link defaults: `-z relro -z now -z noexecstack -z separate-code`
 - explicit non-exec stack note via `.note.GNU-stack`
+
+`staticpie` uses `ld -pie --no-dynamic-linker`, which avoids dynamic-loader startup overhead while keeping a PIE binary shape.
 
 If `nasm` is not on your default `PATH`, prepend its location when invoking `make`.
 
