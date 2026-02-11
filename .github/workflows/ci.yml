@@ -246,14 +246,64 @@ jobs:
             echo "perf_event_paranoid=$perf_paranoid"
           } > perf-meta.txt
 
-          set +e
-          "${perf_cmd[@]}" stat -e instructions,cycles,branches,branch-misses ./lispasm < suite.txt > /dev/null 2> perf-suite.txt
-          suite_rc=$?
-          printf '(add 12 13 14)\n' | "${perf_cmd[@]}" stat -e instructions,cycles,branches,branch-misses ./lispasm > /dev/null 2> perf-single.txt
-          single_rc=$?
-          set -e
+          hw_events="instructions,cycles,branches,branch-misses"
+          sw_events="task-clock,cpu-clock,context-switches,page-faults"
+          suite_cmd="./lispasm < suite.txt > /dev/null 2>/dev/null"
+          single_cmd="printf '(add 12 13 14)\n' | ./lispasm > /dev/null 2>/dev/null"
+
+          run_perf_cmd() {
+            local events="$1"
+            local target_cmd="$2"
+            local out_file="$3"
+
+            set +e
+            "${perf_cmd[@]}" stat -e "$events" -- bash -lc "$target_cmd" > /dev/null 2> "$out_file"
+            local rc=$?
+            set -e
+
+            if [[ $rc -eq 0 ]] && grep -q "<not supported>" "$out_file"; then
+              return 88
+            fi
+
+            return $rc
+          }
+
+          perf_event_set="hardware"
+          perf_events="$hw_events"
+          suite_rc=0
+          single_rc=0
+
+          if run_perf_cmd "$perf_events" "$suite_cmd" perf-suite.txt; then
+            suite_rc=0
+          else
+            suite_rc=$?
+          fi
+          if run_perf_cmd "$perf_events" "$single_cmd" perf-single.txt; then
+            single_rc=0
+          else
+            single_rc=$?
+          fi
+
+          if [[ $suite_rc -eq 88 || $single_rc -eq 88 ]]; then
+            perf_event_set="software-fallback"
+            perf_events="$sw_events"
+            suite_rc=0
+            single_rc=0
+            if run_perf_cmd "$perf_events" "$suite_cmd" perf-suite.txt; then
+              suite_rc=0
+            else
+              suite_rc=$?
+            fi
+            if run_perf_cmd "$perf_events" "$single_cmd" perf-single.txt; then
+              single_rc=0
+            else
+              single_rc=$?
+            fi
+          fi
 
           {
+            echo "perf_event_set=$perf_event_set"
+            echo "perf_events=$perf_events"
             echo "suite_rc=$suite_rc"
             echo "single_rc=$single_rc"
           } >> perf-meta.txt
@@ -300,7 +350,7 @@ jobs:
 
               suite = read_text(suite_path)
               if suite:
-                  f.write("Suite command output (`./lispasm < suite.txt > /dev/null 2> /dev/null`):\n\n")
+                  f.write("Suite perf output:\n\n")
                   f.write("```text\n")
                   f.write(suite)
                   f.write("\n```\n")
