@@ -55,6 +55,7 @@
 %define STAT_OFF_RDEV 40
 %define STAT_OFF_SIZE 48
 %define STAT_BUF_SIZE 144
+%define STAT_OFF_DEV 0
 
 %define DEV_NULL_RDEV 0x103
 
@@ -1263,8 +1264,23 @@ init_input_mode:
     test rsi, rsi
     js .done
     jz .zero_len
-    cmp rsi, 131072
+
+    ; Adaptive mmap threshold based on st_dev major:
+    ; major==0 typically maps to WSL DrvFS/9p -> keep a larger cutoff.
+    mov rax, [rel stat_buf + STAT_OFF_DEV]
+    shr rax, 8
+    and eax, 0xfff
+    test eax, eax
+    jz .threshold_v9fs_like
+    cmp rsi, 8192
     jb .done
+    jmp .map_input
+
+.threshold_v9fs_like:
+    cmp rsi, 32768
+    jb .done
+
+.map_input:
 
     xor edi, edi            ; addr = NULL
     mov edx, PROT_READ
