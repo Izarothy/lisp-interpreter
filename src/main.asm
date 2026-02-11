@@ -102,12 +102,32 @@ global _start
 %%done:
 %endmacro
 
+; parse one expression in parse_list_eval fast path.
+; success: rax=value, edx=PARSE_STATUS_OK
+; failure jumps to parse_list_eval-local failure labels.
+%macro PARSE_EXPR_REQ 0
+    cmp byte [rsi], '('
+    je %%list
+    call parse_number_value
+    cmp edx, PARSE_STATUS_OK
+    je %%done
+    cmp edx, PARSE_STATUS_OVERFLOW
+    je .fail_overflow
+    jmp .fail_unexpected
+%%list:
+    call parse_list_eval
+    cmp edx, PARSE_STATUS_OK
+    jne .fail_preserve
+%%done:
+%endmacro
+
 section .bss
 in_buf: resb IN_BUF_SIZE
 in_len: resq 1
 in_pos: resq 1
 
 line_buf: resb LINE_BUF_SIZE
+line_ptr: resq 1
 out_buf: resb OUT_BUF_SIZE
 
 stdout_buf: resb STDOUT_BUF_SIZE
@@ -186,14 +206,40 @@ _start:
     jmp .repl
 
 .have_line:
-    lea rsi, [rel line_buf]
+    mov rsi, [line_ptr]
     lea rdi, [rsi + rax]
-    call parse_line_eval
-
-    cmp edx, 2
+    SKIP_WS
+    cmp rsi, rdi
     je .repl
-    cmp edx, 1
+
+    cmp byte [rsi], '('
+    je .line_parse_list
+
+    call parse_number_value
+    cmp edx, PARSE_STATUS_OK
+    je .line_expr_ok
+    cmp edx, PARSE_STATUS_OVERFLOW
+    je .line_parse_overflow
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
+    jmp .print_error
+
+.line_parse_list:
+    call parse_list_eval
+    cmp edx, PARSE_STATUS_OK
     jne .print_error
+
+.line_expr_ok:
+    SKIP_WS
+    cmp rsi, rdi
+    je .line_parse_success
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
+    jmp .print_error
+
+.line_parse_overflow:
+    mov dword [err_code], ERR_OVERFLOW
+    jmp .print_error
+
+.line_parse_success:
 
     cmp dword [stdout_sink], SINK_STATE_YES
     je .repl
@@ -242,12 +288,10 @@ _start:
 ;   -1 EOF at start
 ;   -2 line exceeded capacity (consumed/discarded through newline/EOF)
 ;   -3 read syscall failure
+; internal fast path: clobbers callee-saved regs (called only from _start).
 read_line:
-    push rbx
-    push r12
-    push r13
-    push r14
-    push r15
+    lea rax, [rel line_buf]
+    mov [line_ptr], rax
 
     mov r12, rdi            ; destination pointer
     mov r13, rsi            ; destination capacity
@@ -291,6 +335,20 @@ read_line:
 
     test r14, r14
     jnz .after_copy
+    test r11b, r11b
+    jz .copy_or_overflow
+    test rbx, rbx
+    jnz .copy_or_overflow
+    cmp rdx, r13
+    ja .copy_or_overflow
+
+    mov [line_ptr], r8
+    mov rbx, rdx
+    add r15, rdx
+    mov rax, rbx
+    jmp .done
+
+.copy_or_overflow:
 
     mov rax, r13
     sub rax, rbx            ; remaining destination capacity
@@ -357,23 +415,19 @@ read_line:
     mov [in_pos], r15
     mov [in_len], r10
 
-    pop r15
-    pop r14
-    pop r13
-    pop r12
-    pop rbx
     ret
 
 ; process_mmap_input -> rax=0 success, <0 on write error
 process_mmap_input:
+    push rbx
     push r12
-    push r13
     push r14
     push r15
 
+    mov ebx, dword [stdout_sink]
     mov r15, [mmap_ptr]
-    mov r13, [mmap_len]
-    lea r14, [r15 + r13]
+    mov rax, [mmap_len]
+    lea r14, [r15 + rax]
 
 .line_loop:
     cmp r15, r14
@@ -399,14 +453,40 @@ process_mmap_input:
 
     mov rsi, r15
     lea rdi, [r15 + r12]
-    call parse_line_eval
-
-    cmp edx, 2
+    SKIP_WS
+    cmp rsi, rdi
     je .advance
-    cmp edx, 1
+
+    cmp byte [rsi], '('
+    je .line_parse_list
+
+    call parse_number_value
+    cmp edx, PARSE_STATUS_OK
+    je .line_expr_ok
+    cmp edx, PARSE_STATUS_OVERFLOW
+    je .line_parse_overflow
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
+    jmp .emit_error
+
+.line_parse_list:
+    call parse_list_eval
+    cmp edx, PARSE_STATUS_OK
     jne .emit_error
 
-    cmp dword [stdout_sink], SINK_STATE_YES
+.line_expr_ok:
+    SKIP_WS
+    cmp rsi, rdi
+    je .line_parse_success
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
+    jmp .emit_error
+
+.line_parse_overflow:
+    mov dword [err_code], ERR_OVERFLOW
+    jmp .emit_error
+
+.line_parse_success:
+
+    cmp ebx, SINK_STATE_YES
     je .advance
 
     mov rdi, rax
@@ -441,107 +521,19 @@ process_mmap_input:
 .done:
     pop r15
     pop r14
-    pop r13
     pop r12
+    pop rbx
     ret
 
 .fail:
     ; propagate negative write failure from buffered/direct write path.
     jmp .done
 
-; parse_line_eval(line_start=rsi, line_end=rdi)
-; -> rdx=1 success (rax=value), rdx=0 error, rdx=2 blank line/no-op
-parse_line_eval:
-    SKIP_WS
-    cmp rsi, rdi
-    jne .parse_expr
-
-    xor eax, eax
-    mov edx, 2
-    ret
-
-.parse_expr:
-    cmp byte [rsi], '('
-    je .expr_list
-
-    call parse_number_value
-    cmp edx, PARSE_STATUS_OK
-    je .expr_ok
-    cmp edx, PARSE_STATUS_OVERFLOW
-    je .overflow
-    mov dword [err_code], ERR_UNEXPECTED_TOKEN
-    xor eax, eax
-    xor edx, edx
-    ret
-
-.expr_list:
-    call parse_list_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .ret
-
-.expr_ok:
-    SKIP_WS
-    cmp rsi, rdi
-    je .success
-
-    mov dword [err_code], ERR_UNEXPECTED_TOKEN
-    xor eax, eax
-    xor edx, edx
-    ret
-
-.overflow:
-    mov dword [err_code], ERR_OVERFLOW
-    xor eax, eax
-    xor edx, edx
-    ret
-
-.success:
-    mov edx, PARSE_STATUS_OK
-.ret:
-    ret
-
-; parse_expr_eval(rsi=ptr, rdi=end) -> rdx=1 success (rax=value), rdx=0 failure
-; updates rsi to next parse position on success.
-parse_expr_eval:
-    cmp rsi, rdi
-    jae .unexpected
-
-    mov al, [rsi]
-    cmp al, '('
-    je .list
-
-    call parse_number_value
-    cmp edx, PARSE_STATUS_OK
-    je .done
-    cmp edx, PARSE_STATUS_OVERFLOW
-    je .overflow
-    jmp .unexpected
-
-.list:
-    call parse_list_eval
-    jmp .done
-
-.unexpected:
-    mov dword [err_code], ERR_UNEXPECTED_TOKEN
-    jmp .fail
-
-.overflow:
-    mov dword [err_code], ERR_OVERFLOW
-
-.fail:
-    xor eax, eax
-    xor edx, edx
-
-.done:
-    ret
-
 ; parse_list_eval(rsi=ptr, rdi=end) -> rdx=1 success (rax=value), rdx=0 failure
 ; updates rsi to next parse position on success.
 parse_list_eval:
     push r12
     push r13
-    push r14
-    push r15
 
     cmp rsi, rdi
     jae .fail_unexpected
@@ -594,9 +586,7 @@ parse_list_eval:
     cmp byte [rsi], ')'
     je .fail_missing
 
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
 
     mov r13, rax
     cmp r12, OP_ADD
@@ -614,9 +604,7 @@ align 16
     jae .fail_unmatched
     cmp byte [rsi], ')'
     je .close_return
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
     add r13, rax
     jo .fail_overflow
     jmp .add_loop
@@ -628,9 +616,7 @@ align 16
     jae .fail_unmatched
     cmp byte [rsi], ')'
     je .close_return
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
     imul r13, rax
     jo .fail_overflow
     jmp .mul_loop
@@ -641,9 +627,7 @@ align 16
     jae .fail_unmatched
     cmp byte [rsi], ')'
     je .sub_unary_close
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
     sub r13, rax
     jo .fail_overflow
     jmp .sub_loop
@@ -655,9 +639,7 @@ align 16
     jae .fail_unmatched
     cmp byte [rsi], ')'
     je .close_return
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
     sub r13, rax
     jo .fail_overflow
     jmp .sub_loop
@@ -676,15 +658,13 @@ align 16
     jae .fail_unmatched
     cmp byte [rsi], ')'
     je .fail_missing
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
 
 .div_apply:
-    mov r15, rax
-    test r15, r15
+    mov rcx, rax
+    test rcx, rcx
     je .fail_div_zero
-    cmp r15, -1
+    cmp rcx, -1
     jne .do_div
     mov rax, 0x8000000000000000
     cmp r13, rax
@@ -693,7 +673,7 @@ align 16
 .do_div:
     mov rax, r13
     cqo
-    idiv r15
+    idiv rcx
     mov r13, rax
     jmp .div_loop
 
@@ -704,9 +684,7 @@ align 16
     jae .fail_unmatched
     cmp byte [rsi], ')'
     je .close_return
-    call parse_expr_eval
-    cmp edx, PARSE_STATUS_OK
-    jne .fail_preserve
+    PARSE_EXPR_REQ
     jmp .div_apply
 
 .close_return:
@@ -747,8 +725,6 @@ align 16
     xor edx, edx
 
 .ok:
-    pop r15
-    pop r14
     pop r13
     pop r12
     ret
