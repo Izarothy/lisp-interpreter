@@ -115,6 +115,10 @@ jobs:
             binutils \
             python3 \
             util-linux
+          # Best-effort perf tooling install for the running kernel family.
+          for pkg in linux-tools-common linux-tools-generic linux-cloud-tools-generic; do
+            sudo apt-get install -y --no-install-recommends "$pkg" || true
+          done
 
       - name: Download lispasm artifact
         uses: actions/download-artifact@v4
@@ -136,7 +140,19 @@ jobs:
             if command -v perf >/dev/null 2>&1; then
               perf --version
             fi
+            if [[ -r /proc/sys/kernel/perf_event_paranoid ]]; then
+              echo "perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
+            fi
           } | tee bench-env.txt
+
+      - name: Prepare perf permissions
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          # Lower paranoia for unprivileged perf where runner policy allows it.
+          sudo sysctl -w kernel.perf_event_paranoid=-1 || true
+          sudo sysctl -w kernel.kptr_restrict=0 || true
+          cat /proc/sys/kernel/perf_event_paranoid || true
 
       - name: Bench (advisory timing signal)
         id: bench
@@ -192,10 +208,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          perf_paranoid="$(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo unknown)"
+
+          mapfile -t perf_paths < <(ls -1 /usr/lib/linux-tools-*/perf 2>/dev/null || true)
           perf_bin=""
           for p in \
             "/usr/lib/linux-tools-$(uname -r)/perf" \
-            "/usr/lib/linux-tools-6.8.0-100/perf" \
+            "${perf_paths[@]}" \
             "$(command -v perf || true)"; do
             if [[ -n "$p" && -x "$p" ]]; then
               perf_bin="$p"
@@ -214,14 +233,23 @@ jobs:
           fi
 
           echo "perf_not_found=0" > perf-status.env
+          perf_cmd=("$perf_bin")
+          perf_as_root=0
+          if command -v sudo >/dev/null 2>&1; then
+            perf_cmd=(sudo -n "$perf_bin")
+            perf_as_root=1
+          fi
+
           {
             echo "perf_bin=$perf_bin"
+            echo "perf_as_root=$perf_as_root"
+            echo "perf_event_paranoid=$perf_paranoid"
           } > perf-meta.txt
 
           set +e
-          "$perf_bin" stat -e instructions,cycles,branches,branch-misses ./lispasm < suite.txt > /dev/null 2> perf-suite.txt
+          "${perf_cmd[@]}" stat -e instructions,cycles,branches,branch-misses ./lispasm < suite.txt > /dev/null 2> perf-suite.txt
           suite_rc=$?
-          printf '(add 12 13 14)\n' | "$perf_bin" stat -e instructions,cycles,branches,branch-misses ./lispasm > /dev/null 2> perf-single.txt
+          printf '(add 12 13 14)\n' | "${perf_cmd[@]}" stat -e instructions,cycles,branches,branch-misses ./lispasm > /dev/null 2> perf-single.txt
           single_rc=$?
           set -e
 
