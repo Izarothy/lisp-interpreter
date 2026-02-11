@@ -14,6 +14,7 @@
 %define IN_BUF_SIZE 65536
 %define OUT_BUF_SIZE 64
 %define STDOUT_BUF_SIZE 1048576
+%define STDERR_BUF_SIZE 262144
 
 %define OP_ADD 1
 %define OP_SUB 2
@@ -76,6 +77,9 @@ out_buf: resb OUT_BUF_SIZE
 stdout_buf: resb STDOUT_BUF_SIZE
 stdout_used: resq 1
 
+stderr_buf: resb STDERR_BUF_SIZE
+stderr_used: resq 1
+
 err_code: resq 1
 
 section .rodata
@@ -117,10 +121,6 @@ _start:
     jne .have_line
 
     mov qword [err_code], ERR_LINE_TOO_LONG
-    call flush_stdout
-    test rax, rax
-    js .exit_write_error
-
     call print_error_line_stderr
     test rax, rax
     js .exit_write_error
@@ -143,10 +143,6 @@ _start:
     jmp .repl
 
 .print_error:
-    call flush_stdout
-    test rax, rax
-    js .exit_write_error
-
     call print_error_line_stderr
     test rax, rax
     js .exit_write_error
@@ -154,6 +150,10 @@ _start:
 
 .exit_ok:
     call flush_stdout
+    test rax, rax
+    js .exit_write_error
+
+    call flush_stderr
     test rax, rax
     js .exit_write_error
 
@@ -882,7 +882,7 @@ print_error_line_stderr:
     mov rsi, err_line_too_long_len
 
 .emit:
-    call write_stderr_direct
+    call write_stderr_buffered
 
     add rsp, 8
     ret
@@ -956,6 +956,83 @@ flush_stdout:
 
     xor eax, eax
     mov [stdout_used], rax
+
+.success:
+    xor eax, eax
+
+.done:
+    add rsp, 8
+    ret
+
+; write_stderr_buffered(ptr=rdi, len=rsi) -> rax=0 success, <0 error
+write_stderr_buffered:
+    push r12
+    push r13
+
+    test rsi, rsi
+    jz .success
+
+    mov r12, rdi
+    mov r13, rsi
+
+    cmp r13, STDERR_BUF_SIZE
+    jbe .fit_buffer
+
+    call flush_stderr
+    test rax, rax
+    js .done
+
+    mov rdi, r12
+    mov rsi, r13
+    call write_stderr_direct
+    jmp .done
+
+.fit_buffer:
+    mov rax, [stderr_used]
+    mov rcx, STDERR_BUF_SIZE
+    sub rcx, rax
+    cmp r13, rcx
+    jbe .copy_into_buffer
+
+    call flush_stderr
+    test rax, rax
+    js .done
+
+.copy_into_buffer:
+    mov rax, [stderr_used]
+    lea rdi, [rel stderr_buf]
+    add rdi, rax
+    mov rsi, r12
+    mov rcx, r13
+    rep movsb
+
+    mov rax, [stderr_used]
+    add rax, r13
+    mov [stderr_used], rax
+
+.success:
+    xor eax, eax
+
+.done:
+    pop r13
+    pop r12
+    ret
+
+; flush_stderr -> rax=0 success, <0 error
+flush_stderr:
+    sub rsp, 8
+
+    mov rsi, [stderr_used]
+    test rsi, rsi
+    jz .success
+
+    lea rdi, [rel stderr_buf]
+    call write_stderr_direct
+    test rax, rax
+    js .done
+
+    xor eax, eax
+    mov [stderr_used], rax
 
 .success:
     xor eax, eax
