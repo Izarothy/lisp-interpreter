@@ -461,11 +461,25 @@ parse_line_eval:
     ret
 
 .parse_expr:
-    call parse_expr_eval
+    cmp byte [rsi], '('
+    je .expr_list
+
+    call parse_number_value
+    cmp edx, PARSE_STATUS_OK
+    je .expr_ok
+    cmp edx, PARSE_STATUS_OVERFLOW
+    je .overflow
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
+    xor eax, eax
+    xor edx, edx
+    ret
+
+.expr_list:
+    call parse_list_eval
     cmp edx, PARSE_STATUS_OK
     jne .ret
 
-    mov r10, rax
+.expr_ok:
     SKIP_WS
     cmp rsi, rdi
     je .success
@@ -475,8 +489,13 @@ parse_line_eval:
     xor edx, edx
     ret
 
+.overflow:
+    mov dword [err_code], ERR_OVERFLOW
+    xor eax, eax
+    xor edx, edx
+    ret
+
 .success:
-    mov rax, r10
     mov edx, PARSE_STATUS_OK
 .ret:
     ret
