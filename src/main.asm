@@ -140,6 +140,13 @@ err_overflow_len: equ $ - err_overflow
 err_line_too_long: db "error: line too long", 10
 err_line_too_long_len: equ $ - err_line_too_long
 
+digit_pairs:
+%assign __d 0
+%rep 100
+    db '0' + (__d / 10), '0' + (__d % 10)
+%assign __d __d + 1
+%endrep
+
 section .text
 _start:
     cld
@@ -859,16 +866,27 @@ parse_op_symbol:
 
 ; print_int_ln_stdout(value=rdi) -> rax=0 success, <0 on write error
 print_int_ln_stdout:
-    push rbx
-
-    lea rbx, [rel out_buf + OUT_BUF_SIZE]
-    dec rbx
-    mov byte [rbx], 10
+    lea r9, [rel out_buf + OUT_BUF_SIZE]
+    dec r9
+    mov byte [r9], 10
 
     mov rax, rdi
     xor r10d, r10d
     test rax, rax
-    jns .abs_ready
+    js .neg_value
+    cmp rax, 100
+    jae .abs_ready
+    cmp rax, 10
+    jb .fast_one_digit
+    mov ecx, eax
+    add ecx, ecx
+    lea rdx, [rel digit_pairs]
+    mov ax, word [rdx + rcx]
+    sub r9, 2
+    mov word [r9], ax
+    jmp .maybe_sign
+
+.neg_value:
     mov r10d, 1
     neg rax
     jns .abs_ready
@@ -876,39 +894,53 @@ print_int_ln_stdout:
     mov rax, 0x8000000000000000
 
 .abs_ready:
-    mov r11d, 1
-    mov r8d, 10
-
     cmp rax, 0
     jne .digit_loop
-    dec rbx
-    mov byte [rbx], '0'
-    inc r11
-    jmp .maybe_sign
+    jmp .fast_one_digit
 
 .digit_loop:
+    cmp rax, 100
+    jae .digit_loop_div
+
+    cmp rax, 10
+    jb .fast_one_digit
+
+    mov ecx, eax
+    add ecx, ecx
+    lea rdx, [rel digit_pairs]
+    mov ax, word [rdx + rcx]
+    sub r9, 2
+    mov word [r9], ax
+    jmp .maybe_sign
+
+.fast_one_digit:
+    add al, '0'
+    dec r9
+    mov [r9], al
+    jmp .maybe_sign
+
+.digit_loop_div:
+    mov r8d, 10
+.digit_loop_div_iter:
     xor edx, edx
     div r8
     add dl, '0'
-    dec rbx
-    mov [rbx], dl
-    inc r11
+    dec r9
+    mov [r9], dl
     test rax, rax
-    jnz .digit_loop
+    jnz .digit_loop_div_iter
 
 .maybe_sign:
     test r10d, r10d
     jz .emit
-    dec rbx
-    mov byte [rbx], '-'
-    inc r11
+    dec r9
+    mov byte [r9], '-'
 
 .emit:
-    mov rdi, rbx
-    mov rsi, r11
+    mov rdi, r9
+    lea rsi, [rel out_buf + OUT_BUF_SIZE]
+    sub rsi, r9
     call write_stdout_buffered
-
-    pop rbx
     ret
 
 ; print_error_line_stderr -> rax=0 success, <0 on write error
