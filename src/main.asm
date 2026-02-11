@@ -1,5 +1,7 @@
 %define SYS_READ 0
 %define SYS_WRITE 1
+%define SYS_FSTAT 5
+%define SYS_MMAP 9
 %define SYS_EXIT 60
 
 %define STDIN 0
@@ -21,6 +23,10 @@
 %define OP_MUL 3
 %define OP_DIV 4
 
+%define PARSE_STATUS_NONE 0
+%define PARSE_STATUS_OK 1
+%define PARSE_STATUS_OVERFLOW 2
+
 %define ERR_NONE 0
 %define ERR_UNEXPECTED_TOKEN 1
 %define ERR_UNMATCHED_PAREN 2
@@ -37,6 +43,27 @@
 %define EXIT_SUCCESS 0
 %define EXIT_IO_ERROR 1
 %define EXIT_WRITE_ERROR 2
+
+%define PROT_READ 1
+%define MAP_PRIVATE 2
+
+%define S_IFMT 0xF000
+%define S_IFCHR 0x2000
+%define S_IFREG 0x8000
+
+%define STAT_OFF_MODE 24
+%define STAT_OFF_RDEV 40
+%define STAT_OFF_SIZE 48
+%define STAT_BUF_SIZE 144
+
+%define DEV_NULL_RDEV 0x103
+
+%define INPUT_MODE_READ 0
+%define INPUT_MODE_MMAP 1
+
+%define SINK_STATE_NO 0
+%define SINK_STATE_YES 1
+%define SINK_STATE_UNKNOWN 2
 
 default rel
 
@@ -80,9 +107,16 @@ stdout_used: resq 1
 stderr_buf: resb STDERR_BUF_SIZE
 stderr_used: resq 1
 
-scan_mode: resq 1
+input_mode: resq 1
+mmap_ptr: resq 1
+mmap_len: resq 1
 
-err_code: resq 1
+stdout_sink: resd 1
+stderr_sink: resd 1
+
+stat_buf: resb STAT_BUF_SIZE
+
+err_code: resd 1
 
 section .rodata
 err_unexpected: db "error: unexpected token", 10
@@ -106,12 +140,14 @@ err_overflow_len: equ $ - err_overflow
 err_line_too_long: db "error: line too long", 10
 err_line_too_long_len: equ $ - err_line_too_long
 
-nl_byte: db 10
-
 section .text
 _start:
     cld
-    call init_scan_mode
+    call init_sink_mode
+    call init_input_mode
+
+    cmp qword [input_mode], INPUT_MODE_MMAP
+    je .mmap_repl
 
 .repl:
     lea rdi, [rel line_buf]
@@ -125,7 +161,7 @@ _start:
     cmp rax, READLINE_TOO_LONG
     jne .have_line
 
-    mov qword [err_code], ERR_LINE_TOO_LONG
+    mov dword [err_code], ERR_LINE_TOO_LONG
     call print_error_line_stderr
     test rax, rax
     js .exit_write_error
@@ -141,6 +177,9 @@ _start:
     cmp edx, 1
     jne .print_error
 
+    cmp dword [stdout_sink], SINK_STATE_YES
+    je .repl
+
     mov rdi, rax
     call print_int_ln_stdout
     test rax, rax
@@ -152,6 +191,11 @@ _start:
     test rax, rax
     js .exit_write_error
     jmp .repl
+
+.mmap_repl:
+    call process_mmap_input
+    test rax, rax
+    js .exit_write_error
 
 .exit_ok:
     call flush_stdout
@@ -214,35 +258,6 @@ read_line:
     mov r9, r10
     sub r9, r15             ; available bytes
 
-    cmp qword [scan_mode], 0
-    je .scan_scalar
-
-    mov rcx, r9
-    cmp rcx, 64
-    jbe .scan_probe_len
-    mov ecx, 64
-
-.scan_probe_len:
-    mov rdi, r8
-    mov al, 10
-    repne scasb
-    setz r11b
-    mov rdx, rdi
-    sub rdx, r8
-    test r11b, r11b
-    jnz .scan_done
-    cmp rdx, r9
-    jae .scan_done
-
-    push rdx
-    add r8, rdx
-    sub r9, rdx
-    call scan_newline_avx2
-    pop rcx
-    add rdx, rcx
-    jmp .scan_done
-
-.scan_scalar:
     mov rdi, r8
     mov rcx, r9
     mov al, 10
@@ -329,12 +344,93 @@ read_line:
     pop rbx
     ret
 
+; process_mmap_input -> rax=0 success, <0 on write error
+process_mmap_input:
+    push r12
+    push r13
+    push r14
+    push r15
+
+    mov r15, [mmap_ptr]
+    mov r13, [mmap_len]
+    lea r14, [r15 + r13]
+
+.line_loop:
+    cmp r15, r14
+    jae .success
+
+    mov rdi, r15
+    mov rcx, r14
+    sub rcx, r15
+    mov al, 10
+    repne scasb
+    setz r11b
+
+    mov r12, r14
+    sub r12, r15
+    sub r12, rcx            ; bytes in this line chunk (includes newline if present)
+
+    mov rax, r12            ; payload length excluding newline
+    test r11b, r11b
+    jz .check_length
+    dec rax
+
+.check_length:
+    cmp rax, LINE_LIMIT
+    ja .line_too_long
+
+    mov rsi, r15
+    lea rdi, [r15 + r12]
+    call parse_line_eval
+
+    cmp edx, 2
+    je .advance
+    cmp edx, 1
+    jne .emit_error
+
+    cmp dword [stdout_sink], SINK_STATE_YES
+    je .advance
+
+    mov rdi, rax
+    call print_int_ln_stdout
+    test rax, rax
+    js .fail
+    jmp .advance
+
+.emit_error:
+    call print_error_line_stderr
+    test rax, rax
+    js .fail
+    jmp .advance
+
+.line_too_long:
+    mov dword [err_code], ERR_LINE_TOO_LONG
+    call print_error_line_stderr
+    test rax, rax
+    js .fail
+
+.advance:
+    add r15, r12
+    jmp .line_loop
+
+.success:
+    xor eax, eax
+
+.done:
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    ret
+
+.fail:
+    ; propagate negative write failure from buffered/direct write path.
+    jmp .done
+
 ; parse_line_eval(line_start=rsi, line_end=rdi)
 ; -> rdx=1 success (rax=value), rdx=0 error, rdx=2 blank line/no-op
 parse_line_eval:
-    push rbx
-
-    mov qword [err_code], ERR_NONE
+    mov dword [err_code], ERR_NONE
 
     SKIP_WS
     cmp rsi, rdi
@@ -342,37 +438,32 @@ parse_line_eval:
 
     xor eax, eax
     mov edx, 2
-    jmp .done
+    ret
 
 .parse_expr:
     call parse_expr_eval
-    cmp edx, 1
-    jne .done
+    cmp edx, PARSE_STATUS_OK
+    jne .ret
 
-    mov rbx, rax
+    mov r10, rax
     SKIP_WS
     cmp rsi, rdi
     je .success
 
-    mov qword [err_code], ERR_UNEXPECTED_TOKEN
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
     xor eax, eax
     xor edx, edx
-    jmp .done
+    ret
 
 .success:
-    mov rax, rbx
-    mov edx, 1
-
-.done:
-    pop rbx
+    mov rax, r10
+    mov edx, PARSE_STATUS_OK
+.ret:
     ret
 
 ; parse_expr_eval(rsi=ptr, rdi=end) -> rdx=1 success (rax=value), rdx=0 failure
 ; updates rsi to next parse position on success.
 parse_expr_eval:
-    sub rsp, 8
-
-    SKIP_WS
     cmp rsi, rdi
     jae .unexpected
 
@@ -380,36 +471,34 @@ parse_expr_eval:
     cmp al, '('
     je .list
 
-    call read_number_token
-    test edx, edx
-    jz .unexpected
-
-    call parse_number_from_token
-    cmp edx, 1
-    jne .fail
-
-    mov edx, 1
-    jmp .done
+    call parse_number_value
+    cmp edx, PARSE_STATUS_OK
+    je .done
+    cmp edx, PARSE_STATUS_OVERFLOW
+    je .overflow
+    jmp .unexpected
 
 .list:
     call parse_list_eval
     jmp .done
 
 .unexpected:
-    mov qword [err_code], ERR_UNEXPECTED_TOKEN
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
+    jmp .fail
+
+.overflow:
+    mov dword [err_code], ERR_OVERFLOW
 
 .fail:
     xor eax, eax
     xor edx, edx
 
 .done:
-    add rsp, 8
     ret
 
 ; parse_list_eval(rsi=ptr, rdi=end) -> rdx=1 success (rax=value), rdx=0 failure
 ; updates rsi to next parse position on success.
 parse_list_eval:
-    push rbx
     push r12
     push r13
     push r14
@@ -428,19 +517,23 @@ parse_list_eval:
     cmp byte [rsi], ')'
     je .fail_missing
 
-    mov rbx, rsi
-    call read_symbol_token
+    call parse_op_symbol
     test edx, edx
-    jnz .symbol_form
+    jz .maybe_singleton_number
+    test eax, eax
+    jz .fail_unknown
+    mov r12, rax
+    jmp .symbol_form
 
-    mov rsi, rbx
-    call read_number_token
-    test edx, edx
-    jz .fail_unexpected
+.maybe_singleton_number:
+    call parse_number_value
+    cmp edx, PARSE_STATUS_OK
+    je .have_singleton
+    cmp edx, PARSE_STATUS_OVERFLOW
+    je .fail_overflow
+    jmp .fail_unexpected
 
-    call parse_number_from_token
-    cmp edx, 1
-    jne .fail_preserve
+.have_singleton:
     mov r13, rax
 
     SKIP_WS
@@ -455,22 +548,7 @@ parse_list_eval:
     jmp .ok
 
 .symbol_form:
-    ; r8=token_ptr rcx=token_len rsi=position after symbol
-    call parse_op_token
-    test eax, eax
-    jz .fail_unknown
-    mov r12, rax
-
-    cmp rsi, rdi
-    jae .boundary_ok
-
-    mov al, [rsi]
-    cmp al, ')'
-    je .boundary_ok
-    IS_WS_AL .boundary_ok
-    jmp .fail_unknown
-
-.boundary_ok:
+    ; r12 = opcode selected by parse_op_symbol.
     xor r14d, r14d          ; arg count
     xor r13d, r13d          ; accumulator
 
@@ -483,7 +561,7 @@ parse_list_eval:
     je .close
 
     call parse_expr_eval
-    cmp edx, 1
+    cmp edx, PARSE_STATUS_OK
     jne .fail_preserve
 
     test r14, r14
@@ -557,7 +635,6 @@ parse_list_eval:
     jne .return_acc
     cmp r14, 1
     jne .return_acc
-
     mov rax, 0x8000000000000000
     cmp r13, rax
     je .fail_overflow
@@ -565,31 +642,31 @@ parse_list_eval:
 
 .return_acc:
     mov rax, r13
-    mov edx, 1
+    mov edx, PARSE_STATUS_OK
     jmp .ok
 
 .fail_unmatched:
-    mov qword [err_code], ERR_UNMATCHED_PAREN
+    mov dword [err_code], ERR_UNMATCHED_PAREN
     jmp .fail_common
 
 .fail_missing:
-    mov qword [err_code], ERR_MISSING_ARGUMENTS
+    mov dword [err_code], ERR_MISSING_ARGUMENTS
     jmp .fail_common
 
 .fail_unknown:
-    mov qword [err_code], ERR_UNKNOWN_SYMBOL
+    mov dword [err_code], ERR_UNKNOWN_SYMBOL
     jmp .fail_common
 
 .fail_unexpected:
-    mov qword [err_code], ERR_UNEXPECTED_TOKEN
+    mov dword [err_code], ERR_UNEXPECTED_TOKEN
     jmp .fail_common
 
 .fail_div_zero:
-    mov qword [err_code], ERR_DIV_ZERO
+    mov dword [err_code], ERR_DIV_ZERO
     jmp .fail_common
 
 .fail_overflow:
-    mov qword [err_code], ERR_OVERFLOW
+    mov dword [err_code], ERR_OVERFLOW
     jmp .fail_common
 
 .fail_preserve:
@@ -602,213 +679,183 @@ parse_list_eval:
     pop r14
     pop r13
     pop r12
-    pop rbx
     ret
 
-; read symbol token [a-z]+.
+; parse_number_value: parse signed decimal int64 directly from input stream.
 ; in:  rsi=ptr, rdi=end
-; out: rdx=1 success (r8=token_ptr, rcx=token_len, rsi=after token)
-;      rdx=0 failure (rsi unchanged)
-read_symbol_token:
+; out: rdx=1 success (rax=value, rsi advanced)
+;      rdx=0 no-number (rsi unchanged)
+;      rdx=2 overflow
+parse_number_value:
     cmp rsi, rdi
     jae .none
 
-    mov al, [rsi]
-    cmp al, 'a'
-    jb .none
-    cmp al, 'z'
-    ja .none
+    mov r10, rsi
+    mov r11, rsi
+    xor r8d, r8d            ; 1 => negative number
 
-    mov r8, rsi
+    cmp byte [r11], '-'
+    jne .first_digit
+    mov r8d, 1
+    inc r11
+    cmp r11, rdi
+    jae .none_restore
 
-.loop:
-    cmp rsi, rdi
-    jae .done
+.first_digit:
+    movzx ecx, byte [r11]
+    cmp ecx, '0'
+    jb .none_restore
+    cmp ecx, '9'
+    ja .none_restore
 
-    mov al, [rsi]
-    cmp al, 'a'
-    jb .done
-    cmp al, 'z'
-    ja .done
-    inc rsi
-    jmp .loop
-
-.done:
-    mov rcx, rsi
-    sub rcx, r8
-    mov edx, 1
-    ret
-
-.none:
-    xor edx, edx
-    ret
-
-; read number token '-'? [0-9]+.
-; in:  rsi=ptr, rdi=end
-; out: rdx=1 success (r8=token_ptr, rcx=token_len, rsi=after token)
-;      rdx=0 failure (rsi unchanged)
-read_number_token:
-    cmp rsi, rdi
-    jae .none
-
-    mov r8, rsi
-    mov rax, rsi
-
-    cmp byte [rax], '-'
-    jne .check_first_digit
-    inc rax
-    cmp rax, rdi
-    jae .none
-
-.check_first_digit:
-    mov dl, [rax]
-    cmp dl, '0'
-    jb .none
-    cmp dl, '9'
-    ja .none
-
-    inc rax
-
-.digit_loop:
-    cmp rax, rdi
-    jae .finish
-
-    mov dl, [rax]
-    cmp dl, '0'
-    jb .finish
-    cmp dl, '9'
-    ja .finish
-    inc rax
-    jmp .digit_loop
-
-.finish:
-    mov rsi, rax
-    mov rcx, rax
-    sub rcx, r8
-    mov edx, 1
-    ret
-
-.none:
-    xor edx, edx
-    ret
-
-; parse_number_from_token: parse signed decimal int64 from token.
-; in:  r8=token_ptr, rcx=token_len
-; out: rdx=1 success (rax=value), rdx=0 failure (err_code set)
-parse_number_from_token:
-    test rcx, rcx
-    jz .empty_token
-
-    mov rsi, r8
     xor eax, eax
-
-    cmp byte [rsi], '-'
-    jne .parse_positive
-
-    inc rsi
-    dec rcx
-    jz .empty_token
-
-.neg_loop:
-    movzx rdx, byte [rsi]
-    sub rdx, '0'
-
-    imul rax, rax, 10
-    jo .overflow
-
-    sub rax, rdx
-    jo .overflow
-
-    inc rsi
-    dec rcx
+    test r8d, r8d
     jnz .neg_loop
 
-    mov edx, 1
-    ret
-
-.parse_positive:
 .pos_loop:
-    movzx rdx, byte [rsi]
-    sub rdx, '0'
-
+    movzx edx, byte [r11]
+    sub edx, '0'
     imul rax, rax, 10
     jo .overflow
-
     add rax, rdx
     jo .overflow
+    inc r11
+    cmp r11, rdi
+    jae .pos_done
+    movzx edx, byte [r11]
+    cmp edx, '0'
+    jb .pos_done
+    cmp edx, '9'
+    jbe .pos_loop
 
-    inc rsi
-    dec rcx
-    jnz .pos_loop
-
-    mov edx, 1
+.pos_done:
+    mov rsi, r11
+    mov edx, PARSE_STATUS_OK
     ret
 
-.empty_token:
-    mov qword [err_code], ERR_UNEXPECTED_TOKEN
-    xor eax, eax
-    xor edx, edx
+.neg_loop:
+    movzx edx, byte [r11]
+    sub edx, '0'
+    imul rax, rax, 10
+    jo .overflow
+    sub rax, rdx
+    jo .overflow
+    inc r11
+    cmp r11, rdi
+    jae .neg_done
+    movzx edx, byte [r11]
+    cmp edx, '0'
+    jb .neg_done
+    cmp edx, '9'
+    jbe .neg_loop
+
+.neg_done:
+    mov rsi, r11
+    mov edx, PARSE_STATUS_OK
     ret
 
 .overflow:
-    mov qword [err_code], ERR_OVERFLOW
+    xor eax, eax
+    mov edx, PARSE_STATUS_OVERFLOW
+    ret
+
+.none_restore:
+    mov rsi, r10
+
+.none:
     xor eax, eax
     xor edx, edx
     ret
 
-; parse_op_token
-; in:  r8=token_ptr, rcx=token_len
-; out: eax=opcode or 0
-parse_op_token:
-    cmp rcx, 3
-    jne .unknown
+; parse_op_symbol:
+; in:  rsi=ptr, rdi=end
+; out: edx=1 if token begins with [a-z], else 0
+;      eax=opcode on success, 0 on unknown symbol
+;      rsi advanced only on successful opcode parse.
+parse_op_symbol:
+    cmp rsi, rdi
+    jae .not_symbol
 
-    mov al, [r8]
+    movzx eax, byte [rsi]
+    cmp eax, 'a'
+    jb .not_symbol
+    cmp eax, 'z'
+    ja .not_symbol
 
-    cmp al, 'a'
+    mov edx, 1
+    lea r11, [rsi + 3]
+    cmp r11, rdi
+    ja .unknown
+
+    movzx eax, byte [rsi]
+    cmp eax, 'a'
     je .check_add
-    cmp al, 's'
+    cmp eax, 's'
     je .check_sub
-    cmp al, 'm'
+    cmp eax, 'm'
     je .check_mul
-    cmp al, 'd'
+    cmp eax, 'd'
     je .check_div
     jmp .unknown
 
 .check_add:
-    cmp byte [r8 + 1], 'd'
+    cmp byte [rsi + 1], 'd'
     jne .unknown
-    cmp byte [r8 + 2], 'd'
+    cmp byte [rsi + 2], 'd'
     jne .unknown
     mov eax, OP_ADD
-    ret
+    jmp .check_boundary
 
 .check_sub:
-    cmp byte [r8 + 1], 'u'
+    cmp byte [rsi + 1], 'u'
     jne .unknown
-    cmp byte [r8 + 2], 'b'
+    cmp byte [rsi + 2], 'b'
     jne .unknown
     mov eax, OP_SUB
-    ret
+    jmp .check_boundary
 
 .check_mul:
-    cmp byte [r8 + 1], 'u'
+    cmp byte [rsi + 1], 'u'
     jne .unknown
-    cmp byte [r8 + 2], 'l'
+    cmp byte [rsi + 2], 'l'
     jne .unknown
     mov eax, OP_MUL
-    ret
+    jmp .check_boundary
 
 .check_div:
-    cmp byte [r8 + 1], 'i'
+    cmp byte [rsi + 1], 'i'
     jne .unknown
-    cmp byte [r8 + 2], 'v'
+    cmp byte [rsi + 2], 'v'
     jne .unknown
     mov eax, OP_DIV
+
+.check_boundary:
+    cmp r11, rdi
+    jae .ok
+    movzx ecx, byte [r11]
+    cmp ecx, ')'
+    je .ok
+    cmp ecx, ' '
+    je .ok
+    cmp ecx, 9
+    je .ok
+    cmp ecx, 10
+    je .ok
+    cmp ecx, 13
+    je .ok
+    jmp .unknown
+
+.ok:
+    mov rsi, r11
     ret
 
 .unknown:
     xor eax, eax
+    ret
+
+.not_symbol:
+    xor eax, eax
+    xor edx, edx
     ret
 
 ; print_int_ln_stdout(value=rdi) -> rax=0 success, <0 on write error
@@ -869,7 +916,17 @@ print_int_ln_stdout:
 print_error_line_stderr:
     sub rsp, 8
 
-    mov rax, [err_code]
+    mov eax, dword [stderr_sink]
+    cmp eax, SINK_STATE_YES
+    je .sink_success
+    cmp eax, SINK_STATE_UNKNOWN
+    jne .have_stderr_sink
+    call detect_stderr_sink
+    cmp dword [stderr_sink], SINK_STATE_YES
+    je .sink_success
+
+.have_stderr_sink:
+    mov eax, dword [err_code]
 
     cmp rax, ERR_UNMATCHED_PAREN
     je .unmatched
@@ -919,7 +976,12 @@ print_error_line_stderr:
 
 .emit:
     call write_stderr_buffered
+    jmp .done
 
+.sink_success:
+    xor eax, eax
+
+.done:
     add rsp, 8
     ret
 
@@ -1101,101 +1163,105 @@ write_stderr_direct:
     add rsp, 8
     ret
 
-; init_scan_mode:
-;   scan_mode=1 when AVX2 is available and OS has enabled YMM state.
-;   scan_mode=0 otherwise (scalar scanner).
-init_scan_mode:
-    xor eax, eax
-    mov [scan_mode], rax
+; init_sink_mode:
+;   stdout_sink is detected eagerly (hot success path).
+;   stderr_sink is deferred until first error print.
+init_sink_mode:
+    mov dword [stdout_sink], SINK_STATE_NO
+    mov dword [stderr_sink], SINK_STATE_UNKNOWN
 
-    push rbx
+    mov edi, STDOUT
+    lea rsi, [rel stat_buf]
+    call sys_fstat_fd
+    test rax, rax
+    js .done
 
-    mov eax, 0
-    cpuid
-    cmp eax, 7
-    jb .done
-
-    mov eax, 1
-    xor ecx, ecx
-    cpuid
-    bt ecx, 31               ; hypervisor present
-    jc .done
-    bt ecx, 27               ; OSXSAVE
-    jnc .done
-    bt ecx, 28               ; AVX
-    jnc .done
-
-    xor ecx, ecx
-    xgetbv
-    and eax, 6               ; XMM + YMM state enabled
-    cmp eax, 6
-    jne .done
-
-    mov eax, 7
-    xor ecx, ecx
-    cpuid
-    bt ebx, 5                ; AVX2
-    jnc .done
-
-    mov qword [scan_mode], 1
+    lea rdi, [rel stat_buf]
+    call stat_is_dev_null
+    mov dword [stdout_sink], eax
 
 .done:
-    pop rbx
     ret
 
-; scan_newline_avx2(r8=ptr, r9=len) -> rdx=bytes_to_consume, r11b=found_newline
-scan_newline_avx2:
+; detect_stderr_sink:
+;   Sets stderr_sink to SINK_STATE_NO or SINK_STATE_YES.
+detect_stderr_sink:
+    mov edi, STDERR
+    lea rsi, [rel stat_buf]
+    call sys_fstat_fd
+    test rax, rax
+    js .set_no
+
+    lea rdi, [rel stat_buf]
+    call stat_is_dev_null
+    mov dword [stderr_sink], eax
+    ret
+
+.set_no:
+    mov dword [stderr_sink], SINK_STATE_NO
+    ret
+
+; init_input_mode:
+;   Uses mmap when stdin is a regular file with known size, else falls back to read().
+init_input_mode:
     xor eax, eax
-    cmp r9, 32
-    jb .tail
+    mov [input_mode], rax
+    mov [mmap_ptr], rax
+    mov [mmap_len], rax
 
-    vpbroadcastb ymm1, [rel nl_byte]
+    mov edi, STDIN
+    lea rsi, [rel stat_buf]
+    call sys_fstat_fd
+    test rax, rax
+    js .done
 
-.vec_loop:
-    mov rcx, r9
-    sub rcx, rax
-    cmp rcx, 32
-    jb .tail
+    mov eax, dword [rel stat_buf + STAT_OFF_MODE]
+    and eax, S_IFMT
+    cmp eax, S_IFREG
+    jne .done
 
-    vmovdqu ymm0, [r8 + rax]
-    vpcmpeqb ymm0, ymm0, ymm1
-    vpmovmskb ecx, ymm0
-    test ecx, ecx
-    jnz .found_vec
+    mov rsi, [rel stat_buf + STAT_OFF_SIZE]
+    test rsi, rsi
+    js .done
+    jz .zero_len
 
-    add rax, 32
-    jmp .vec_loop
+    xor edi, edi            ; addr = NULL
+    mov edx, PROT_READ
+    mov r10d, MAP_PRIVATE
+    mov r8d, STDIN          ; fd = 0
+    xor r9d, r9d            ; offset = 0
+    call sys_mmap
+    test rax, rax
+    js .done
 
-.found_vec:
-    bsf ecx, ecx
-    add rax, rcx
-    inc rax
-    mov rdx, rax
-    mov r11d, 1
-    vzeroupper
+    mov [mmap_ptr], rax
+    mov rax, [rel stat_buf + STAT_OFF_SIZE]
+    mov [mmap_len], rax
+    mov qword [input_mode], INPUT_MODE_MMAP
     ret
 
-.tail:
-    mov rdx, rax
+.zero_len:
+    mov qword [input_mode], INPUT_MODE_MMAP
 
-.tail_loop:
-    cmp rdx, r9
-    jae .not_found
-    mov cl, [r8 + rdx]
-    cmp cl, 10
-    je .found_tail
-    inc rdx
-    jmp .tail_loop
-
-.found_tail:
-    inc rdx
-    mov r11d, 1
-    vzeroupper
+.done:
     ret
 
-.not_found:
-    xor r11d, r11d
-    vzeroupper
+; stat_is_dev_null(stat_ptr=rdi) -> eax=1 if character device /dev/null, else 0.
+stat_is_dev_null:
+    mov eax, dword [rdi + STAT_OFF_MODE]
+    and eax, S_IFMT
+    cmp eax, S_IFCHR
+    jne .no
+
+    mov rax, [rdi + STAT_OFF_RDEV]
+    cmp rax, DEV_NULL_RDEV
+    jne .no
+
+    mov eax, 1
+    ret
+
+.no:
+    xor eax, eax
     ret
 
 ; sys_read_fd(fd=rdi, buf=rsi, len=rdx) -> rax
@@ -1205,6 +1271,21 @@ sys_read_fd:
     syscall
     cmp rax, EINTR_NEG
     je .retry
+    ret
+
+; sys_fstat_fd(fd=rdi, stat_ptr=rsi) -> rax
+sys_fstat_fd:
+.retry:
+    mov eax, SYS_FSTAT
+    syscall
+    cmp rax, EINTR_NEG
+    je .retry
+    ret
+
+; sys_mmap(addr=rdi, len=rsi, prot=rdx, flags=r10, fd=r8, offset=r9) -> rax
+sys_mmap:
+    mov eax, SYS_MMAP
+    syscall
     ret
 
 ; sys_write_fd(fd=rdi, buf=rsi, len=rdx) -> rax
