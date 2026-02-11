@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "bench not implemented yet" >&2
+echo "tests not implemented yet" >&2
 exit 1
