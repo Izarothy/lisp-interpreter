@@ -5,9 +5,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-test-bench:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -24,11 +28,274 @@ jobs:
             python3 \
             util-linux
 
+      - name: Environment
+        run: |
+          uname -a
+          lscpu
+          nasm -v
+          ld -v
+
       - name: Build
         run: make clean all
 
-      - name: Test
-        run: make test
+      - name: Binary sanity checks
+        run: |
+          set -euo pipefail
+          mkdir -p build
 
-      - name: Bench
-        run: make bench
+          readelf -d lispasm > build/readelf.dynamic.txt
+          readelf -l lispasm > build/readelf.program.txt
+          nm -u lispasm > build/nm.undefined.txt
+
+          if grep -q "(NEEDED)" build/readelf.dynamic.txt; then
+            echo "Unexpected dynamic dependency detected in lispasm" >&2
+            cat build/readelf.dynamic.txt >&2
+            exit 1
+          fi
+
+          if grep -q "Requesting program interpreter" build/readelf.program.txt; then
+            echo "Unexpected dynamic loader interpreter detected in lispasm" >&2
+            cat build/readelf.program.txt >&2
+            exit 1
+          fi
+
+          if grep -Eq "[^[:space:]]" build/nm.undefined.txt; then
+            echo "Unexpected unresolved symbols detected in lispasm" >&2
+            cat build/nm.undefined.txt >&2
+            exit 1
+          fi
+
+      - name: Upload lispasm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lispasm-bin
+          path: lispasm
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    runs-on: ubuntu-24.04
+    needs: build
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download lispasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lispasm-bin
+          path: .
+
+      - name: Prepare binary
+        run: chmod +x lispasm
+
+      - name: Test (per-case mode)
+        run: bash tests/test.sh cases
+
+      - name: Test (suite stream mode)
+        run: bash tests/test.sh suite-stream
+
+  bench_advisory:
+    runs-on: ubuntu-24.04
+    needs: test
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make \
+            nasm \
+            binutils \
+            python3 \
+            util-linux
+
+      - name: Download lispasm artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: lispasm-bin
+          path: .
+
+      - name: Prepare binary
+        run: chmod +x lispasm
+
+      - name: Capture bench environment
+        run: |
+          {
+            echo "date_utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            uname -a
+            lscpu
+            nasm -v
+            ld -v
+            if command -v perf >/dev/null 2>&1; then
+              perf --version
+            fi
+          } | tee bench-env.txt
+
+      - name: Bench (advisory timing signal)
+        id: bench
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          BENCH_FORMAT=json bash tests/bench.sh | tee bench-results.json
+
+      - name: Publish bench summary
+        if: always()
+        env:
+          BENCH_OUTCOME: ${{ steps.bench.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          outcome = os.environ.get("BENCH_OUTCOME", "unknown")
+          result_path = Path("bench-results.json")
+
+          with summary_path.open("a", encoding="utf-8") as f:
+              f.write("## Benchmark (Advisory)\n\n")
+              f.write(f"Step outcome: `{outcome}`\n\n")
+
+              if not result_path.exists():
+                  f.write("No benchmark JSON output found.\n")
+                  raise SystemExit(0)
+
+              try:
+                  data = json.loads(result_path.read_text(encoding="utf-8"))
+              except Exception as exc:
+                  f.write(f"Failed to parse benchmark JSON: `{exc}`\n")
+                  raise SystemExit(0)
+
+              f.write("| Metric | Value |\n")
+              f.write("|---|---|\n")
+              f.write(f"| timed_runs | {data.get('timed_runs', 'n/a')} |\n")
+              f.write(f"| warmup_runs | {data.get('warmup_runs', 'n/a')} |\n")
+              f.write(f"| median (s) | {data.get('median', 'n/a')} |\n")
+              f.write(f"| min (s) | {data.get('min', 'n/a')} |\n")
+              f.write(f"| avg (s) | {data.get('avg', 'n/a')} |\n")
+              f.write(f"| taskset_used | {data.get('taskset_used', 'n/a')} |\n")
+              f.write(f"| cpu_pin_requested | {data.get('cpu_pin_requested', 'n/a')} |\n")
+              f.write(f"| timestamp_utc | {data.get('timestamp_utc', 'n/a')} |\n")
+              f.write(f"| cpu_info_hash | `{data.get('cpu_info_hash', 'n/a')}` |\n")
+          PY
+
+      - name: Perf advisory (suite + single expression)
+        id: perf
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          perf_bin=""
+          for p in \
+            "/usr/lib/linux-tools-$(uname -r)/perf" \
+            "/usr/lib/linux-tools-6.8.0-100/perf" \
+            "$(command -v perf || true)"; do
+            if [[ -n "$p" && -x "$p" ]]; then
+              perf_bin="$p"
+              break
+            fi
+          done
+
+          if [[ -z "$perf_bin" ]]; then
+            echo "perf_not_found=1" > perf-status.env
+            {
+              echo "perf_bin=not-found"
+              echo "suite_rc=127"
+              echo "single_rc=127"
+            } > perf-meta.txt
+            exit 0
+          fi
+
+          echo "perf_not_found=0" > perf-status.env
+          {
+            echo "perf_bin=$perf_bin"
+          } > perf-meta.txt
+
+          set +e
+          "$perf_bin" stat -e instructions,cycles,branches,branch-misses ./lispasm < suite.txt > /dev/null 2> perf-suite.txt
+          suite_rc=$?
+          printf '(add 12 13 14)\n' | "$perf_bin" stat -e instructions,cycles,branches,branch-misses ./lispasm > /dev/null 2> perf-single.txt
+          single_rc=$?
+          set -e
+
+          {
+            echo "suite_rc=$suite_rc"
+            echo "single_rc=$single_rc"
+          } >> perf-meta.txt
+
+      - name: Publish perf summary
+        if: always()
+        env:
+          PERF_OUTCOME: ${{ steps.perf.outcome }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          outcome = os.environ.get("PERF_OUTCOME", "unknown")
+          status_env = Path("perf-status.env")
+          meta_path = Path("perf-meta.txt")
+          suite_path = Path("perf-suite.txt")
+          single_path = Path("perf-single.txt")
+
+          def read_text(path: Path, max_lines: int = 20) -> str:
+              if not path.exists():
+                  return ""
+              lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+              return "\n".join(lines[:max_lines])
+
+          with summary_path.open("a", encoding="utf-8") as f:
+              f.write("\n## Perf (Advisory)\n\n")
+              f.write(f"Step outcome: `{outcome}`\n\n")
+
+              perf_not_found = False
+              if status_env.exists():
+                  content = status_env.read_text(encoding="utf-8", errors="replace")
+                  perf_not_found = "perf_not_found=1" in content
+              if perf_not_found:
+                  f.write("`perf` binary not found on runner; skipped.\n")
+                  raise SystemExit(0)
+
+              if meta_path.exists():
+                  f.write("Metadata:\n\n")
+                  f.write("```text\n")
+                  f.write(meta_path.read_text(encoding="utf-8", errors="replace"))
+                  f.write("```\n")
+
+              suite = read_text(suite_path)
+              if suite:
+                  f.write("Suite command output (`./lispasm < suite.txt > /dev/null 2> /dev/null`):\n\n")
+                  f.write("```text\n")
+                  f.write(suite)
+                  f.write("\n```\n")
+
+              single = read_text(single_path)
+              if single:
+                  f.write("Single expression output (`(add 12 13 14)`):\n\n")
+                  f.write("```text\n")
+                  f.write(single)
+                  f.write("\n```\n")
+          PY
+
+      - name: Upload bench artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-artifacts
+          path: |
+            bench-env.txt
+            bench-results.json
+            perf-meta.txt
+            perf-status.env
+            perf-suite.txt
+            perf-single.txt
+          if-no-files-found: warn
+          retention-days: 14
