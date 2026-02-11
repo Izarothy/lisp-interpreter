@@ -4,6 +4,24 @@ LD ?= ld
 NASMFLAGS ?= -f elf64 -Wall -Werror -Ox
 LDFLAGS ?= -z relro -z now -z noexecstack -z separate-code
 
+# Probe NASM warning flags across versions. Some NASM releases support
+# -w-unknown-warning while others don't; some require explicit suppression
+# for reloc-rel-dword under -Werror.
+NASM_RELOC_WARN_FLAGS := $(shell \
+	if command -v "$(NASM)" >/dev/null 2>&1; then \
+		d="$$(mktemp -d 2>/dev/null || mktemp -d -t nasmprobe)"; \
+		asm="$$d/probe.asm"; \
+		obj="$$d/probe.o"; \
+		printf 'bits 64\nsection .text\nnop\n' > "$$asm"; \
+		if "$(NASM)" -f elf64 -Wall -Werror -w-unknown-warning -w-reloc-rel-dword "$$asm" -o "$$obj" >/dev/null 2>&1; then \
+			echo '-w-unknown-warning -w-reloc-rel-dword'; \
+		elif "$(NASM)" -f elf64 -Wall -Werror -w-reloc-rel-dword "$$asm" -o "$$obj" >/dev/null 2>&1; then \
+			echo '-w-reloc-rel-dword'; \
+		fi; \
+		rm -rf "$$d"; \
+	fi)
+NASMFLAGS += $(NASM_RELOC_WARN_FLAGS)
+
 BUILD_DIR ?= build
 SRC := src/main.asm
 OBJ := $(BUILD_DIR)/main.o
