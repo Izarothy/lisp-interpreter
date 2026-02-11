@@ -365,10 +365,8 @@ process_mmap_input:
     mov al, 10
     repne scasb
     setz r11b
-
-    mov r12, r14
-    sub r12, r15
-    sub r12, rcx            ; bytes in this line chunk (includes newline if present)
+    mov r12, rdi
+    sub r12, r15            ; bytes in this line chunk (includes newline if present)
 
     mov rax, r12            ; payload length excluding newline
     test r11b, r11b
@@ -430,8 +428,6 @@ process_mmap_input:
 ; parse_line_eval(line_start=rsi, line_end=rdi)
 ; -> rdx=1 success (rax=value), rdx=0 error, rdx=2 blank line/no-op
 parse_line_eval:
-    mov dword [err_code], ERR_NONE
-
     SKIP_WS
     cmp rsi, rdi
     jne .parse_expr
