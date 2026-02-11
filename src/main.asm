@@ -80,6 +80,8 @@ stdout_used: resq 1
 stderr_buf: resb STDERR_BUF_SIZE
 stderr_used: resq 1
 
+scan_mode: resq 1
+
 err_code: resq 1
 
 section .rodata
@@ -104,9 +106,12 @@ err_overflow_len: equ $ - err_overflow
 err_line_too_long: db "error: line too long", 10
 err_line_too_long_len: equ $ - err_line_too_long
 
+nl_byte: db 10
+
 section .text
 _start:
     cld
+    call init_scan_mode
 
 .repl:
     lea rdi, [rel line_buf]
@@ -209,6 +214,35 @@ read_line:
     mov r9, r10
     sub r9, r15             ; available bytes
 
+    cmp qword [scan_mode], 0
+    je .scan_scalar
+
+    mov rcx, r9
+    cmp rcx, 64
+    jbe .scan_probe_len
+    mov ecx, 64
+
+.scan_probe_len:
+    mov rdi, r8
+    mov al, 10
+    repne scasb
+    setz r11b
+    mov rdx, rdi
+    sub rdx, r8
+    test r11b, r11b
+    jnz .scan_done
+    cmp rdx, r9
+    jae .scan_done
+
+    push rdx
+    add r8, rdx
+    sub r9, rdx
+    call scan_newline_avx2
+    pop rcx
+    add rdx, rcx
+    jmp .scan_done
+
+.scan_scalar:
     mov rdi, r8
     mov rcx, r9
     mov al, 10
@@ -217,6 +251,8 @@ read_line:
 
     mov rdx, r9
     sub rdx, rcx            ; bytes to consume from input buffer
+
+.scan_done:
 
     test r14, r14
     jnz .after_copy
@@ -1063,6 +1099,103 @@ write_stderr_direct:
     call sys_write_all_fd
 
     add rsp, 8
+    ret
+
+; init_scan_mode:
+;   scan_mode=1 when AVX2 is available and OS has enabled YMM state.
+;   scan_mode=0 otherwise (scalar scanner).
+init_scan_mode:
+    xor eax, eax
+    mov [scan_mode], rax
+
+    push rbx
+
+    mov eax, 0
+    cpuid
+    cmp eax, 7
+    jb .done
+
+    mov eax, 1
+    xor ecx, ecx
+    cpuid
+    bt ecx, 31               ; hypervisor present
+    jc .done
+    bt ecx, 27               ; OSXSAVE
+    jnc .done
+    bt ecx, 28               ; AVX
+    jnc .done
+
+    xor ecx, ecx
+    xgetbv
+    and eax, 6               ; XMM + YMM state enabled
+    cmp eax, 6
+    jne .done
+
+    mov eax, 7
+    xor ecx, ecx
+    cpuid
+    bt ebx, 5                ; AVX2
+    jnc .done
+
+    mov qword [scan_mode], 1
+
+.done:
+    pop rbx
+    ret
+
+; scan_newline_avx2(r8=ptr, r9=len) -> rdx=bytes_to_consume, r11b=found_newline
+scan_newline_avx2:
+    xor eax, eax
+    cmp r9, 32
+    jb .tail
+
+    vpbroadcastb ymm1, [rel nl_byte]
+
+.vec_loop:
+    mov rcx, r9
+    sub rcx, rax
+    cmp rcx, 32
+    jb .tail
+
+    vmovdqu ymm0, [r8 + rax]
+    vpcmpeqb ymm0, ymm0, ymm1
+    vpmovmskb ecx, ymm0
+    test ecx, ecx
+    jnz .found_vec
+
+    add rax, 32
+    jmp .vec_loop
+
+.found_vec:
+    bsf ecx, ecx
+    add rax, rcx
+    inc rax
+    mov rdx, rax
+    mov r11d, 1
+    vzeroupper
+    ret
+
+.tail:
+    mov rdx, rax
+
+.tail_loop:
+    cmp rdx, r9
+    jae .not_found
+    mov cl, [r8 + rdx]
+    cmp cl, 10
+    je .found_tail
+    inc rdx
+    jmp .tail_loop
+
+.found_tail:
+    inc rdx
+    mov r11d, 1
+    vzeroupper
+    ret
+
+.not_found:
+    xor r11d, r11d
+    vzeroupper
     ret
 
 ; sys_read_fd(fd=rdi, buf=rsi, len=rdx) -> rax
