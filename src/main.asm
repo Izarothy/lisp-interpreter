@@ -1223,6 +1223,8 @@ init_input_mode:
     test rsi, rsi
     js .done
     jz .zero_len
+    cmp rsi, 131072
+    jb .done
 
     xor edi, edi            ; addr = NULL
     mov edx, PROT_READ
