@@ -9,7 +9,7 @@ SRC := src/main.asm
 OBJ := $(BUILD_DIR)/main.o
 BIN := lispasm
 
-.PHONY: all clean run test bench
+.PHONY: all clean run test bench bench-compare
 
 all: $(BIN)
 
@@ -30,6 +30,13 @@ test: $(BIN)
 
 bench: $(BIN)
 	bash tests/bench.sh
+
+bench-compare: $(BIN)
+	@if [ -z "$(BASELINE)" ]; then \
+		echo "usage: make bench-compare BASELINE=/path/to/old/lispasm"; \
+		exit 1; \
+	fi
+	bash tests/bench_compare.sh "$(BASELINE)" "./$(BIN)"
 
 clean:
 	rm -rf $(BUILD_DIR) $(BIN)
